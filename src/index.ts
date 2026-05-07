@@ -317,31 +317,111 @@ function parseLaunchArgs(args: string[]) {
 }
 
 async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string | null> {
-  console.log("\n  Ollama models — press ENTER for latest:\n");
+  const MAX_DISPLAY = 8;
+  let visibleCount = Math.min(MAX_DISPLAY, models.length);
+  let selectedIdx = 0;
+  let done = false;
 
-  const MAX_DISPLAY = 10;
-  const displayModels = models.slice(0, MAX_DISPLAY);
-  const overflow = models.length - MAX_DISPLAY;
+  function render() {
+    // Clear previous output
+    process.stdout.write("\x1b[0J");
 
-  for (let i = 0; i < displayModels.length; i++) {
-    const m = displayModels[i];
-    const label = i === 0 ? "[default — latest]" : "";
-    const size = formatSize(m.size);
-    const tag = m.isLocal ? "local" : "cloud";
-    console.log(`  ${i + 1}. ${m.name} ${label}`);
-    if (m.parameterSize) console.log(`     ${m.parameterSize}, ${size}, ${tag}`);
-    else console.log(`     ${size}, ${tag}`);
+    console.log("\n  Ollama models — use \u2191\u2193 arrows, Enter to select:\n");
+
+    for (let i = 0; i < visibleCount; i++) {
+      const m = models[i];
+      const cursor = i === selectedIdx ? "\u25B6" : " ";
+      const label = i === 0 ? "(latest)" : "";
+      const size = formatSize(m.size);
+      const tag = m.isLocal ? "local" : "cloud";
+      const hl = i === selectedIdx ? "\x1b[1;37m" : "\x1b[0;37m";
+      const reset = "\x1b[0m";
+
+      console.log(`  ${cursor} ${hl}${i + 1}. ${m.name}${reset} ${label}`);
+      if (m.parameterSize) {
+        console.log(`     ${m.parameterSize}, ${size}, ${tag}`);
+      } else {
+        console.log(`     ${size}, ${tag}`);
+      }
+    }
+
+    const hidden = models.length - visibleCount;
+    if (hidden > 0) {
+      if (selectedIdx === visibleCount - 1) {
+        console.log(`\n  \u25BC  Show ${hidden} more...`);
+      } else {
+        console.log(`\n  ... and ${hidden} more (arrow to last to unfold)`);
+      }
+    } else {
+      console.log("");
+    }
+
+    console.log(`\n  Press Enter to select, Esc to cancel`);
   }
 
-  if (overflow > 0) console.log(`\n  ... and ${overflow} more models`);
+  const stdin = process.stdin;
+  stdin.setRawMode(true);
+  stdin.resume();
 
-  const choice = await askOptional("Select [1-${displayModels.length}, Enter for default]");
-  if (!choice) return models[0].name;
+  render();
 
-  const idx = parseInt(choice) - 1;
-  if (idx >= 0 && idx < displayModels.length) return displayModels[idx].name;
+  return new Promise((resolve) => {
+    function cleanup() {
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stdin.removeAllListeners("data");
+    }
 
-  return models[0].name;
+    stdin.on("data", (buf: Buffer) => {
+      const key = buf.toString();
+
+      // Enter
+      if (key === "\r" || key === "\n") {
+        cleanup();
+        if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
+          // Expand to show more
+          visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
+          selectedIdx = visibleCount - MAX_DISPLAY;
+          render();
+          return;
+        }
+        resolve(models[selectedIdx].name);
+        return;
+      }
+
+      // Esc
+      if (key === "\x1b") {
+        cleanup();
+        resolve(null);
+        return;
+      }
+
+      // Arrow up
+      if (key === "\x1b[A") {
+        selectedIdx = Math.max(0, selectedIdx - 1);
+        render();
+        return;
+      }
+
+      // Arrow down
+      if (key === "\x1b[B") {
+        if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
+          visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
+        }
+        selectedIdx = Math.min(visibleCount - 1, selectedIdx + 1);
+        render();
+        return;
+      }
+
+      // Number keys 1-9 for quick selection
+      const num = parseInt(key);
+      if (num >= 1 && num <= Math.min(9, visibleCount)) {
+        cleanup();
+        resolve(models[num - 1].name);
+        return;
+      }
+    });
+  });
 }
 
 async function pickTransport(): Promise<TransportType | null> {
