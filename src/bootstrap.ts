@@ -2,6 +2,45 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BootstrapBlueprint } from "./types";
 
+const API_INVOKE = async (prompt: string): Promise<string> => {
+  const key = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || "";
+  if (!key) {
+    // Fallback: return a generic blueprint without LLM
+    return `
+NAME: Knowledge Work Co
+DESCRIPTION: An AI-powered knowledge work company.
+DIVISIONS:
+strategy: Boardroom, vision, and strategic direction
+  - CEO: Vision and final strategic calls
+  - Strategist: GTM frameworks and client strategy
+intelligence: Research, analysis, and intelligence gathering
+  - Intel Analyst: Lead researcher and source collection
+  - Data Analyst: Quantitative analysis and metrics
+engineering: Platform, tooling, and infrastructure
+  - Platform Engineer: Devbox, infrastructure, internal tools
+commercial: Publications, brand, and client engagement
+  - Editor-in-Chief: Editorial strategy and quality control
+  - Content Strategist: Writing and narrative structure
+DEVBOX: python@3.12, nodejs@22, ripgrep, jq, pandoc, ffmpeg`;
+  }
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2048,
+      system: "You design AI-native company structures.",
+      messages: [{ role: "user", content: prompt }],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  const json = await response.json() as any;
+  if (json.error) throw new Error(json.error.message);
+  return json.content?.[0]?.text || "";
+};
+
 export async function create(root: string, blueprint: BootstrapBlueprint) {
   await mkdir(root, { recursive: true });
 
@@ -35,7 +74,7 @@ export async function create(root: string, blueprint: BootstrapBlueprint) {
   }
 }
 
-export async function inferBlueprint(description: string, invoke: (prompt: string) => Promise<string>): Promise<BootstrapBlueprint> {
+export async function inferBlueprint(description: string): Promise<BootstrapBlueprint> {
   const prompt = `You are designing an AI-native company structure using the my-org pattern. Given this organizational description, produce a company blueprint.
 
 ${description}
@@ -71,7 +110,7 @@ DEVBOX: python@3.12, nodejs@22, ripgrep, jq, pandoc, ffmpeg
 
 Be specific. No hedging. Make bold, useful choices.`;
 
-  const response = await invoke(prompt);
+  const response = await API_INVOKE(prompt);
   return parseBlueprint(response);
 }
 

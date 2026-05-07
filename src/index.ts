@@ -295,7 +295,13 @@ async function handleLaunch(args: string[]) {
   if (config.baseUrl) console.log(`  Base URL:  ${config.baseUrl}`);
   console.log();
 
-  const org = await detectOrBootstrap(config);
+  const org = await detect(ROOT);
+  if (!org) {
+    console.log("No workspace detected. Run: farm --bootstrap \"Describe your company\"");
+    console.log("Or run 'farm' to bootstrap a generic workspace.");
+    process.exit(0);
+  }
+
   const invoke = createInvoke(config);
   await enter(org, invoke, config);
 }
@@ -433,7 +439,7 @@ async function handleBootstrap(args: string) {
 
   console.log(`Analyzing: "${args}"...`);
   const invoke = createInvoke(config);
-  const blueprint = await inferBlueprint(args, invoke);
+  const blueprint = await inferBlueprint(args);
 
   console.log(`\nBlueprint for "${blueprint.name}":`);
   console.log(`  ${blueprint.description}\n`);
@@ -453,7 +459,7 @@ async function handleDefault(args: string[]) {
   const config = await loadConfig();
   if (!config) {
     console.log("No configuration found.\n");
-    console.log("Run:  farm launch claude|pi|opencode|codex|openai|hermes|ollama|bun");
+    console.log("Run:  farm launch claude|pi|opencode|codex|openai|hermes|bun [--backend ollama]");
     console.log("  or: farm launch  (interactive picker)\n");
     process.exit(1);
   }
@@ -486,17 +492,17 @@ async function handleDefault(args: string[]) {
 // ── SHARED ─────────────────────────────────────────────────────
 
 async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
-  const org = await detect(ROOT);
+  let org = await detect(ROOT);
   if (org) return org;
 
-  console.log("Creating new workspace...");
+  // No workspace — silently create one
   const invoke = createInvoke(config);
-  const blueprint = await inferBlueprint("A company using AI agents", invoke);
-  console.log(`${blueprint.name} initialized — ${blueprint.divisions.length} divisions\n`);
+  const blueprint = await inferBlueprint("an AI-powered knowledge work company");
+  // Don't log during silent bootstrap
   await create(ROOT, blueprint);
-  const result = await detect(ROOT);
-  if (!result) throw new Error("Bootstrap failed");
-  return result;
+  org = await detect(ROOT);
+  if (!org) throw new Error("Bootstrap failed — could not detect created structure");
+  return org;
 }
 
 function createInvoke(config: SentinelConfig) {
