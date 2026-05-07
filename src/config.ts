@@ -5,6 +5,7 @@ import type { TransportType } from "./types";
 
 export interface SentinelConfig {
   transport: TransportType;
+  backend?: string;
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -22,7 +23,6 @@ const DEFAULTS: Record<string, { transport: TransportType; model: string }> = {
   openai: { transport: "openai", model: "gpt-5" },
   copilot: { transport: "copilot", model: "github-copilot" },
   hermes: { transport: "hermes", model: "llama3.1" },
-  ollama: { transport: "ollama", model: "llama3.1" },
   bun: { transport: "bun", model: "claude-sonnet-4-20250514" },
 };
 
@@ -54,7 +54,6 @@ export function allTransports(): { key: TransportType; label: string; descriptio
     { key: "openai", label: "OpenAI CLI", description: "OpenAI's official CLI (`openai`)" },
     { key: "copilot", label: "Copilot CLI", description: "GitHub Copilot CLI (`github-copilot-cli`)" },
     { key: "hermes", label: "Hermes Agent", description: "Hermes AI agent (`hermes`)" },
-    { key: "ollama", label: "Ollama", description: "Local models via Ollama API" },
     { key: "bun", label: "Direct API", description: "Anthropic/OpenAI API via fetch (zero deps)" },
   ];
 }
@@ -85,14 +84,45 @@ export async function detectAvailable(): Promise<TransportType[]> {
     if (found) available.push(key);
   }
 
-  // Ollama check via HTTP
-  try {
-    const res = await fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(2000) });
-    if (res.ok) available.push("ollama");
-  } catch {}
-
-  // Bun/API always available as fallback
   available.push("bun");
 
   return available;
+}
+
+export interface OllamaModel {
+  name: string;
+  size: number;
+  parameterSize: string;
+  modifiedAt: string;
+  isLocal: boolean;
+}
+
+export async function listOllamaModels(baseUrl?: string): Promise<OllamaModel[]> {
+  const base = baseUrl || "http://localhost:11434";
+  try {
+    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
+    const json = await res.json();
+    const models = (json.models || []) as any[];
+
+    return models
+      .filter((m: any) => !m.name.includes("embed"))
+      .map((m: any) => ({
+        name: m.name,
+        size: m.size || 0,
+        parameterSize: m.details?.parameter_size || "",
+        modifiedAt: m.modified_at || "",
+        isLocal: !m.remote_model,
+      }))
+      .sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+  } catch {
+    return [];
+  }
+}
+
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
 }
