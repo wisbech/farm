@@ -317,112 +317,89 @@ function parseLaunchArgs(args: string[]) {
 }
 
 async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string | null> {
-  const MAX_DISPLAY = 8;
-  let visibleCount = Math.min(MAX_DISPLAY, models.length);
+  const MAX_DISPLAY = 10;
   let selectedIdx = 0;
-  let previousLines = 0;
+  let visible = Math.min(MAX_DISPLAY, models.length);
 
   function render() {
+    // Move cursor to top-left and clear
+    process.stdout.write("\x1b[H\x1b[J");
+
     const lines: string[] = [];
+    lines.push("  Ollama models \u2014 \u2191\u2193 to select, Enter to confirm, Esc to quit\n");
 
-    // Move up previous lines and clear below
-    if (previousLines > 0) {
-      lines.push(`\x1b[${previousLines}A`);
-    }
-    lines.push("\x1b[0J");
-
-    lines.push("\n  Ollama models — \u2191\u2193 arrows, Enter to select:\n");
-
-    for (let i = 0; i < visibleCount; i++) {
+    for (let i = 0; i < visible; i++) {
       const m = models[i];
       const cursor = i === selectedIdx ? "\u25B6" : " ";
       const label = i === 0 ? "(latest)" : "";
       const size = formatSize(m.size);
       const tag = m.isLocal ? "local" : "cloud";
-      const hl = i === selectedIdx ? "\x1b[1;37m" : "\x1b[0;37m";
-      const reset = "\x1b[0m";
+      const isSelected = i === selectedIdx;
 
-      lines.push(`  ${cursor} ${hl}${i + 1}. ${m.name}${reset} ${label}`);
-      if (m.parameterSize) {
-        lines.push(`     ${m.parameterSize}, ${size}, ${tag}`);
-      } else {
-        lines.push(`     ${size}, ${tag}`);
-      }
+      const prefix = isSelected ? "\x1b[1;37m\x1b[44m" : "";
+      const suffix = isSelected ? "\x1b[0m" : "";
+
+      const num = String(i + 1).padStart(2, " ");
+      lines.push(`${prefix}  ${cursor} ${num}. ${m.name} ${label}${suffix}`);
+      if (m.parameterSize)
+        lines.push(`${prefix}       ${m.parameterSize}, ${size}, ${tag}${suffix}`);
+      else
+        lines.push(`${prefix}       ${size}, ${tag}${suffix}`);
     }
 
-    const hidden = models.length - visibleCount;
+    const hidden = models.length - visible;
     if (hidden > 0) {
-      if (selectedIdx === visibleCount - 1) {
-        lines.push(`\n  \u25BC  Show ${hidden} more...`);
-      } else {
-        lines.push(`\n  ... ${hidden} more (arrow to last to unfold)`);
-      }
-    } else {
-      lines.push("");
+      const msg = selectedIdx === visible - 1
+        ? `\n  \u25BC Enter to show ${hidden} more`
+        : `\n  \u2026 ${hidden} more (arrow to last)`;
+      lines.push(msg);
     }
 
-    lines.push("\n  Enter to select, Esc to cancel");
-
-    const output = lines.join("\n");
-    previousLines = output.split("\n").length;
-    process.stdout.write(output);
+    process.stdout.write(lines.join("\n"));
   }
 
-  const stdin = process.stdin;
+  const { stdin, stdout } = process;
+  stdout.write("\x1b[?25l\x1b[?1049h");
   stdin.setRawMode(true);
   stdin.resume();
-
   render();
 
   return new Promise((resolve) => {
-    function cleanup() {
+    function done(value: string | null) {
+      stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m");
       stdin.setRawMode(false);
-      stdin.pause();
-      process.stdin.removeAllListeners("data");
+      stdin.removeAllListeners("data");
+      // Yield to let terminal settle before the next readline
+      setTimeout(() => resolve(value), 50);
     }
 
     stdin.on("data", (buf: Buffer) => {
-      const key = buf.toString();
+      const k = buf.toString();
 
-      if (key === "\r" || key === "\n") {
-        if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
-          visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
-          selectedIdx = visibleCount - MAX_DISPLAY;
-          previousLines = 0;
-          render();
-          return;
-        }
-        cleanup();
-        resolve(models[selectedIdx].name);
-        return;
-      }
-
-      if (key === "\x1b" || key === "\u0003") {
-        cleanup();
-        resolve(null);
-        return;
-      }
-
-      if (key === "\x1b[A") {
+      if (k === "\x1b[A") {
         selectedIdx = Math.max(0, selectedIdx - 1);
-        render();
-        return;
+        render(); return;
       }
-
-      if (key === "\x1b[B") {
-        if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
-          visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
+      if (k === "\x1b[B") {
+        if (selectedIdx === visible - 1 && models.length > visible)
+          visible = Math.min(visible + MAX_DISPLAY, models.length);
+        selectedIdx = Math.min(visible - 1, selectedIdx + 1);
+        render(); return;
+      }
+      if (k === "\r" || k === "\n") {
+        if (selectedIdx === visible - 1 && models.length > visible) {
+          visible = Math.min(visible + MAX_DISPLAY, models.length);
+          selectedIdx = visible - MAX_DISPLAY;
+          render(); return;
         }
-        selectedIdx = Math.min(visibleCount - 1, selectedIdx + 1);
-        render();
+        done(models[selectedIdx].name);
         return;
       }
+      if (k === "\x1b" || k === "\u0003") { done(null); return; }
 
-      const num = parseInt(key);
-      if (num >= 1 && num <= Math.min(9, visibleCount)) {
-        cleanup();
-        resolve(models[num - 1].name);
-        return;
+      const n = parseInt(k);
+      if (n >= 1 && n <= Math.min(9, models.length)) {
+        done(models[n - 1].name); return;
       }
     });
   });
@@ -512,14 +489,13 @@ async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
   const org = await detect(ROOT);
   if (org) return org;
 
-  console.log("No my-org structure found. Creating one...");
+  console.log("Creating new workspace...");
   const invoke = createInvoke(config);
-  const description = await ask("Describe what you're building");
-  const blueprint = await inferBlueprint(description, invoke);
-  console.log(`\nBlueprint: ${blueprint.name} — ${blueprint.description}\n`);
+  const blueprint = await inferBlueprint("A company using AI agents", invoke);
+  console.log(`${blueprint.name} initialized — ${blueprint.divisions.length} divisions\n`);
   await create(ROOT, blueprint);
   const result = await detect(ROOT);
-  if (!result) throw new Error("Bootstrap failed — could not detect created structure");
+  if (!result) throw new Error("Bootstrap failed");
   return result;
 }
 
