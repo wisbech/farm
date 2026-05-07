@@ -36,6 +36,44 @@ export async function evolve(
 
     bus.log("farm", `Gen ${g}: ${mutationType} mutation from gen ${parent?.generation || 0}`);
 
+    if (mutationType === "transport") {
+      const config = require("./farm-security").loadFarmConfig(org.root);
+      const transports = config.security.availableTransports;
+      if (transports.length <= 1) {
+        bus.log("farm", `Gen ${g}: transport mutation skipped — only one transport available`);
+        continue;
+      }
+      const tResult = await transportMutate(parent || bestVariant, tool, transports);
+      if (!tResult) {
+        bus.log("farm", `Gen ${g}: transport mutation — no unused transports`);
+        continue;
+      }
+
+      // Run verification on the alternate transport
+      const altInvoke = createTransport(
+        tResult.transport as any, undefined, undefined, undefined
+      ).invoke.bind(createTransport(tResult.transport as any, undefined, undefined, undefined));
+
+      const verified = await verify(tResult.variant, tool, org, altInvoke);
+      insertGeneration(db, verified, toolPath);
+
+      // Record transport history
+      tool.transportHistory.push({
+        transport: tResult.transport,
+        avgMetric: verified.metric,
+        lastTested: verified.timestamp,
+      });
+
+      if (verified.shadowPassed && isImproved(verified, bestVariant, tool.metricDirection)) {
+        bestVariant = verified;
+        tool.preferredTransport = tResult.transport;
+        bus.log("farm", `Gen ${g}: transport switch — ${tResult.transport} scored ${verified.metric.toFixed(4)}`);
+      } else {
+        bus.log("farm", `Gen ${g}: transport test — ${tResult.transport} scored ${verified.metric.toFixed(4)} (best: ${tool.preferredTransport})`);
+      }
+      continue;
+    }
+
     const variant = await mutate(parent || bestVariant, mutationType, tool, org, invoke);
     if (!variant) {
       bus.log("farm", `Gen ${g}: mutation failed`);

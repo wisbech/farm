@@ -418,7 +418,8 @@ async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
 }
 
 function createInvoke(config: SentinelConfig) {
-  return createTransport(config.transport, config.apiKey, config.baseUrl, config.model).invoke.bind(createTransport(config.transport, config.apiKey, config.baseUrl, config.model));
+  const transport = createTransport(config.transport, config.apiKey, config.baseUrl, config.model);
+  return transport.invoke.bind(transport);
 }
 
 async function enter(org: Org, invoke: (p: string) => Promise<string>, config: SentinelConfig) {
