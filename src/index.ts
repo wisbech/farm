@@ -320,13 +320,18 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
   const MAX_DISPLAY = 8;
   let visibleCount = Math.min(MAX_DISPLAY, models.length);
   let selectedIdx = 0;
-  let done = false;
+  let previousLines = 0;
 
   function render() {
-    // Clear previous output
-    process.stdout.write("\x1b[0J");
+    const lines: string[] = [];
 
-    console.log("\n  Ollama models — use \u2191\u2193 arrows, Enter to select:\n");
+    // Move up previous lines and clear below
+    if (previousLines > 0) {
+      lines.push(`\x1b[${previousLines}A`);
+    }
+    lines.push("\x1b[0J");
+
+    lines.push("\n  Ollama models — \u2191\u2193 arrows, Enter to select:\n");
 
     for (let i = 0; i < visibleCount; i++) {
       const m = models[i];
@@ -337,26 +342,30 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
       const hl = i === selectedIdx ? "\x1b[1;37m" : "\x1b[0;37m";
       const reset = "\x1b[0m";
 
-      console.log(`  ${cursor} ${hl}${i + 1}. ${m.name}${reset} ${label}`);
+      lines.push(`  ${cursor} ${hl}${i + 1}. ${m.name}${reset} ${label}`);
       if (m.parameterSize) {
-        console.log(`     ${m.parameterSize}, ${size}, ${tag}`);
+        lines.push(`     ${m.parameterSize}, ${size}, ${tag}`);
       } else {
-        console.log(`     ${size}, ${tag}`);
+        lines.push(`     ${size}, ${tag}`);
       }
     }
 
     const hidden = models.length - visibleCount;
     if (hidden > 0) {
       if (selectedIdx === visibleCount - 1) {
-        console.log(`\n  \u25BC  Show ${hidden} more...`);
+        lines.push(`\n  \u25BC  Show ${hidden} more...`);
       } else {
-        console.log(`\n  ... and ${hidden} more (arrow to last to unfold)`);
+        lines.push(`\n  ... ${hidden} more (arrow to last to unfold)`);
       }
     } else {
-      console.log("");
+      lines.push("");
     }
 
-    console.log(`\n  Press Enter to select, Esc to cancel`);
+    lines.push("\n  Enter to select, Esc to cancel");
+
+    const output = lines.join("\n");
+    previousLines = output.split("\n").length;
+    process.stdout.write(output);
   }
 
   const stdin = process.stdin;
@@ -375,35 +384,31 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
     stdin.on("data", (buf: Buffer) => {
       const key = buf.toString();
 
-      // Enter
       if (key === "\r" || key === "\n") {
-        cleanup();
         if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
-          // Expand to show more
           visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
           selectedIdx = visibleCount - MAX_DISPLAY;
+          previousLines = 0;
           render();
           return;
         }
+        cleanup();
         resolve(models[selectedIdx].name);
         return;
       }
 
-      // Esc
-      if (key === "\x1b") {
+      if (key === "\x1b" || key === "\u0003") {
         cleanup();
         resolve(null);
         return;
       }
 
-      // Arrow up
       if (key === "\x1b[A") {
         selectedIdx = Math.max(0, selectedIdx - 1);
         render();
         return;
       }
 
-      // Arrow down
       if (key === "\x1b[B") {
         if (selectedIdx === visibleCount - 1 && models.length > visibleCount) {
           visibleCount = Math.min(visibleCount + MAX_DISPLAY, models.length);
@@ -413,7 +418,6 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
         return;
       }
 
-      // Number keys 1-9 for quick selection
       const num = parseInt(key);
       if (num >= 1 && num <= Math.min(9, visibleCount)) {
         cleanup();
