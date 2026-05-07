@@ -1,0 +1,49 @@
+{
+  "name": "farm",
+  "version": "1.0.0",
+  "description": "Sentinel Farm — my-org bootstrap, recursive agent orchestration, and directed evolution harness",
+  "type": "module",
+  "bin": {
+    "farm": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm --banner '#!/usr/bin/env bun' && chmod +x dist/index.js",
+    "clean": "rm -rf dist",
+    "test": "bun test",
+    "prepublishOnly": "npm run clean && npm run build && bun test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "keywords": [
+    "ai-agent",
+    "my-org",
+    "agent-orchestration",
+    "task-decomposition",
+    "cli",
+    "recursive-ai",
+    "organizational-ai",
+    "agent-harness",
+    "directed-evolution",
+    "dark-software-factory"
+  ],
+  "homepage": "https://github.com/wisbech/farm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wisbech/farm.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}

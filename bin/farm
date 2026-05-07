@@ -1,0 +1,18 @@
+#!/usr/bin/env bun
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkgRoot = resolve(__dirname, "..");
+const distEntry = resolve(pkgRoot, "dist", "index.js");
+const srcEntry = resolve(pkgRoot, "src", "index.ts");
+const entry = existsSync(distEntry) ? distEntry : srcEntry;
+
+const result = spawnSync("bun", ["run", entry, ...process.argv.slice(2)], {
+  stdio: "inherit",
+  cwd: process.cwd(),
+});
+
+process.exit(result.status ?? 1);
