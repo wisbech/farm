@@ -15,6 +15,13 @@ import { generateBenchmark, runBenchmark } from "./farm-bench";
 import { inventTool } from "./farm-toolsmith";
 import { createAssemblyLine, autoEvolveLoop } from "./farm-assembly";
 import { getDB } from "./farm-db";
+import { startDaemonLoop } from "./farm-daemon";
+import { readStatus } from "./farm-status";
+import { ActivityLog } from "./farm-activity";
+import { talk } from "./farm-talk";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { loadFarmConfig } from "./farm-security";
 
 const ARGS = process.argv.slice(2);
 const ROOT = process.cwd();
@@ -45,6 +52,24 @@ async function main() {
       return;
     case "machines":
       await handleMachinesList();
+      return;
+    case "start":
+      await handleStart();
+      return;
+    case "stop":
+      await handleStop();
+      return;
+    case "status":
+      await handleStatus();
+      return;
+    case "log":
+      await handleLog(cmdArgs);
+      return;
+    case "talk":
+      await handleTalk();
+      return;
+    case "daemon":
+      await handleDaemonEntry();
       return;
     case "--bootstrap":
     case "-b":
@@ -393,7 +418,8 @@ async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
 }
 
 function createInvoke(config: SentinelConfig) {
-  return createTransport(config.transport, config.apiKey, config.baseUrl, config.model).invoke.bind(createTransport(config.transport, config.apiKey, config.baseUrl, config.model));
+  const transport = createTransport(config.transport, config.apiKey, config.baseUrl, config.model);
+  return transport.invoke.bind(transport);
 }
 
 async function enter(org: Org, invoke: (p: string) => Promise<string>, config: SentinelConfig) {
@@ -491,6 +517,17 @@ USAGE:
   farm machines
     List all distilled state machines.
 
+  farm start
+    Start farm as background daemon — auto-processes research.
+  farm stop
+    Stop the running daemon.
+  farm status
+    Show what the daemon is working on.
+  farm log [N]
+    Show recent activity (default 20 entries).
+  farm talk
+    Open chat session into running daemon — steer, ask, redirect.
+
   farm [--bootstrap "description"] ["task"]
     Run harness in my-org workspace. Bootstraps if needed.
 
@@ -519,6 +556,88 @@ function formatResult(text: string): string {
 
 function generateId(): string {
   return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ── DAEMON COMMANDS ───────────────────────────────────────
+
+async function handleStart() {
+  const config = await loadConfig();
+  if (!config) { console.log("No config. Run 'farm launch' first."); process.exit(1); }
+
+  const org = await detect(ROOT);
+  if (!org) { console.log("No my-org structure. Run 'farm --bootstrap' first."); process.exit(1); }
+
+  const pidPath = join(ROOT, ".sentinel", "farm.pid");
+  if (existsSync(pidPath)) {
+    const pid = parseInt(readFileSync(pidPath, "utf-8"));
+    try { process.kill(pid, 0); } catch {
+      unlinkSync(pidPath);
+    }
+    if (existsSync(pidPath)) { console.log("Farm already running."); process.exit(1); }
+  }
+
+  const farmConfig = loadFarmConfig(ROOT);
+  const allowedPaths = require("./farm-security").deriveAllowedPaths(ROOT, farmConfig);
+
+  console.log("Sentinel Farm starting...");
+  console.log(`  Allowed:  ${allowedPaths.join(", ")}`);
+  console.log(`  Transport: ${config.transport} (${config.model})`);
+  console.log(`  Transports available: ${farmConfig.security.availableTransports.join(", ")}`);
+  console.log();
+
+  startDaemonLoop(ROOT);
+}
+
+async function handleStop() {
+  const pidPath = join(ROOT, ".sentinel", "farm.pid");
+  if (!existsSync(pidPath)) { console.log("Farm not running."); return; }
+  const pid = parseInt(readFileSync(pidPath, "utf-8"));
+  try { process.kill(pid, "SIGTERM"); } catch (e) { console.log("Process already gone."); }
+  try { unlinkSync(pidPath); } catch {}
+  console.log("Farm stopped.");
+}
+
+async function handleStatus() {
+  const status = readStatus(ROOT);
+  if (!status) { console.log("Farm not running. Start with 'farm start'."); process.exit(1); }
+
+  try { if (status.pid) process.kill(status.pid, 0); }
+  catch { console.log("Farm pid stale — restart with 'farm start'."); process.exit(1); }
+
+  const uptime = status.lastActivity
+    ? Math.floor((Date.now() - new Date(status.lastActivity).getTime()) / 1000)
+    : 0;
+
+  console.log(`\nSentinel Farm — running`);
+  console.log(`  PID:      ${status.pid}`);
+  console.log(`  Running:  ${status.running.map(r => `${r.agent}: ${r.task}`).join(", ") || "none"}`);
+  console.log(`  Queued:   ${status.queued.length}`);
+  console.log(`  Done:     ${status.completed.length}`);
+  console.log(`  Activity: ${uptime}s ago`);
+}
+
+async function handleLog(args: string[]) {
+  const activity = new ActivityLog(ROOT);
+  const limit = parseInt(args.find(a => !isNaN(parseInt(a))) || "20");
+  const entries = activity.read(limit);
+
+  if (entries.length === 0) { console.log("No activity yet."); return; }
+
+  for (const e of entries) {
+    const time = new Date(e.timestamp).toISOString().slice(11, 19);
+    const kind = e.type === "task_start" ? "\u25B6" :
+                 e.type === "task_end" ? "\u25BC" :
+                 e.type === "steer" ? "\u27A1" : "\u2022";
+    console.log(`  [${time}] ${kind} ${e.message}`);
+  }
+}
+
+async function handleTalk() {
+  await talk(ROOT);
+}
+
+async function handleDaemonEntry() {
+  // Process has been re-spawned as daemon — just run the loop
 }
 
 main().catch(err => {

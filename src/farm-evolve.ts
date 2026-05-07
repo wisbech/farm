@@ -36,6 +36,44 @@ export async function evolve(
 
     bus.log("farm", `Gen ${g}: ${mutationType} mutation from gen ${parent?.generation || 0}`);
 
+    if (mutationType === "transport") {
+      const config = require("./farm-security").loadFarmConfig(org.root);
+      const transports = config.security.availableTransports;
+      if (transports.length <= 1) {
+        bus.log("farm", `Gen ${g}: transport mutation skipped — only one transport available`);
+        continue;
+      }
+      const tResult = await transportMutate(parent || bestVariant, tool, transports);
+      if (!tResult) {
+        bus.log("farm", `Gen ${g}: transport mutation — no unused transports`);
+        continue;
+      }
+
+      // Run verification on the alternate transport
+      const altInvoke = createTransport(
+        tResult.transport as any, undefined, undefined, undefined
+      ).invoke.bind(createTransport(tResult.transport as any, undefined, undefined, undefined));
+
+      const verified = await verify(tResult.variant, tool, org, altInvoke);
+      insertGeneration(db, verified, toolPath);
+
+      // Record transport history
+      tool.transportHistory.push({
+        transport: tResult.transport,
+        avgMetric: verified.metric,
+        lastTested: verified.timestamp,
+      });
+
+      if (verified.shadowPassed && isImproved(verified, bestVariant, tool.metricDirection)) {
+        bestVariant = verified;
+        tool.preferredTransport = tResult.transport;
+        bus.log("farm", `Gen ${g}: transport switch — ${tResult.transport} scored ${verified.metric.toFixed(4)}`);
+      } else {
+        bus.log("farm", `Gen ${g}: transport test — ${tResult.transport} scored ${verified.metric.toFixed(4)} (best: ${tool.preferredTransport})`);
+      }
+      continue;
+    }
+
     const variant = await mutate(parent || bestVariant, mutationType, tool, org, invoke);
     if (!variant) {
       bus.log("farm", `Gen ${g}: mutation failed`);
@@ -81,6 +119,8 @@ function loadTool(toolPath: string, options: EvolutionOptions, org: Org): Machin
     metricName: options.metric || "quality_score",
     metricDirection: options.direction || "maximize",
     distilled: null,
+    preferredTransport: "claude",
+    transportHistory: [],
     benchmarks: [],
     isEvolving: true,
   };
@@ -192,8 +232,43 @@ function mutationGuide(mt: MutationType, tool: MachineTool): string {
     gate: "Add or modify a quality gate — what must pass before output leaves this agent?",
     trigger: "Change what events or conditions activate this agent.",
     protocol: "Modify the process or methodology constraints. How should work flow through this agent?",
+    transport: "Do NOT change the content. This mutation only switches the LLM transport for evaluation. The content stays identical.",
   };
   return guides[mt] || "Improve this artifact.";
+}
+
+async function transportMutate(
+  parent: Variant,
+  tool: MachineTool,
+  availableTransports: string[]
+): Promise<{ variant: Variant; transport: string } | null> {
+  const unused = availableTransports.filter(
+    t => !tool.transportHistory.find(h => h.transport === t) ||
+         Date.now() - new Date(tool.transportHistory.find(h => h.transport === t)!.lastTested).getTime() > 48 * 3600_000
+  );
+
+  const candidates = unused.length > 0 ? unused : availableTransports;
+  const transport = candidates[Math.floor(Math.random() * candidates.length)];
+
+  if (transport === tool.preferredTransport) return null;
+
+  const id = `gen-${parent.generation + 1}-transport-${Date.now()}`;
+
+  const variant: Variant = {
+    id,
+    generation: parent.generation + 1,
+    parentId: parent.id,
+    mutationType: "transport",
+    content: parent.content,
+    diff: `TRANSPORT: ${tool.preferredTransport} → ${transport}`,
+    metric: 0,
+    checks: [],
+    shadowPassed: false,
+    invariantPassed: true,
+    timestamp: new Date().toISOString(),
+  };
+
+  return { variant, transport };
 }
 
 async function verify(

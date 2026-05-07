@@ -82,7 +82,13 @@ export interface BootstrapBlueprint {
 }
 
 export type ArtifactType = "persona" | "protocol" | "program" | "tool" | "code" | "config";
-export type MutationType = "prompt" | "scope" | "tool" | "gate" | "trigger" | "protocol";
+export type MutationType = "prompt" | "scope" | "tool" | "gate" | "trigger" | "protocol" | "transport";
+
+export interface TransportRecord {
+  transport: TransportType;
+  avgMetric: number;
+  lastTested: string;
+}
 
 export interface MachineTool {
   path: string;
@@ -95,6 +101,31 @@ export interface MachineTool {
   distilled: SMState[] | null;
   benchmarks: string[];
   isEvolving: boolean;
+  preferredTransport: TransportType;
+  transportHistory: TransportRecord[];
+}
+
+export interface FarmConfig {
+  security: {
+    addPaths: string[];
+    availableTransports: TransportType[];
+  };
+}
+
+export interface FarmStatus {
+  pid: number | null;
+  running: { task: string; agent: string; started: string; id: string }[];
+  queued: { task: string; id: string }[];
+  completed: { task: string; result: string; time: string }[];
+  lastActivity: string;
+  uptime: number;
+}
+
+export interface ActivityEntry {
+  type: "task_start" | "task_end" | "evolve_start" | "evolve_end" | "distill" | "bench" | "tool_invent" | "steer" | "system";
+  message: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SMState {
