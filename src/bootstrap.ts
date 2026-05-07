@@ -17,6 +17,11 @@ export async function create(root: string, blueprint: BootstrapBlueprint) {
   await mkdir(join(root, "wiki", "topics"), { recursive: true });
   await writeFile(join(root, "wiki", "index.md"), rootWikiContent(blueprint));
 
+  await mkdir(join(root, ".sentinel"), { recursive: true });
+  await writeFile(join(root, ".sentinel", "farm.json"), JSON.stringify({
+    security: { addPaths: [], availableTransports: ["claude"] }
+  }, null, 2) + "\n");
+
   for (const div of blueprint.divisions) {
     const divPath = join(root, div.name);
     await mkdir(join(divPath, "agents"), { recursive: true });
