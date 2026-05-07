@@ -4,8 +4,10 @@ import { harness } from "./harness";
 import { createTransport } from "./transport";
 import {
   loadConfig, saveConfig, defaultsFor, allTransports,
-  detectAvailable, type SentinelConfig,
+  detectAvailable, listOllamaModels, formatSize,
+  type SentinelConfig,
 } from "./config";
+import type { OllamaModel } from "./config";
 import { bus } from "./bus";
 import type { Org, Task, TransportType } from "./types";
 
@@ -232,17 +234,37 @@ async function handleLaunch(args: string[]) {
 
   if (explicitTransport) {
     const defaults = defaultsFor(explicitTransport);
+    let model = options.model || defaults.model;
+    let baseUrl = options.baseUrl;
+
+    if (options.backend === "ollama") {
+      const models = await listOllamaModels();
+      if (models.length === 0) {
+        console.log("Ollama not reachable or no models found.\nStart Ollama and pull a model: ollama pull llama3.1");
+        process.exit(1);
+      }
+
+      if (options.model) {
+        model = options.model;
+      } else {
+        model = await pickOllamaModelInteractive(models);
+        if (!model) { console.log("No model selected."); process.exit(1); }
+      }
+      if (!baseUrl) baseUrl = "http://localhost:11434";
+    }
+
     config = {
       transport: explicitTransport,
-      model: options.model || defaults.model,
+      backend: options.backend,
+      model,
       apiKey: options.apiKey,
-      baseUrl: options.baseUrl,
+      baseUrl,
       updated: new Date().toISOString(),
     };
   } else {
     const existing = await loadConfig();
     console.log(existing
-      ? `Saved config: ${existing.transport} (${existing.model})\n`
+      ? `Saved config: ${existing.transport}${existing.backend ? ` (backend: ${existing.backend})` : ""} (${existing.model})\n`
       : "No saved configuration.\n");
 
     const transport = await pickTransport();
@@ -261,17 +283,13 @@ async function handleLaunch(args: string[]) {
       const key = await askOptional("API key (leave empty to use env var)");
       if (key) apiKey = key;
     }
-    if (transport === "ollama") {
-      const url = await askOptional("Ollama URL (default: http://localhost:11434)");
-      baseUrl = url || undefined;
-    }
 
     config = { transport, model, apiKey, baseUrl, updated: new Date().toISOString() };
   }
 
   await saveConfig(config);
   console.log(`\nConfiguration saved:`);
-  console.log(`  Transport: ${config.transport}`);
+  console.log(`  Transport: ${config.transport}${config.backend ? ` (backend: ${config.backend})` : ""}`);
   console.log(`  Model:     ${config.model}`);
   if (config.apiKey) console.log(`  API Key:   [set]`);
   if (config.baseUrl) console.log(`  Base URL:  ${config.baseUrl}`);
@@ -291,10 +309,39 @@ function parseLaunchArgs(args: string[]) {
     const arg = args[i];
     if (known.includes(arg as TransportType)) transport = arg as TransportType;
     else if (arg === "--model" || arg === "-m") options.model = args[++i];
+    else if (arg === "--backend" || arg === "-b" || arg === "--back") options.backend = args[++i] || "ollama";
     else if (arg === "--api-key" || arg === "-k") options.apiKey = args[++i];
     else if (arg === "--base-url" || arg === "--url") options.baseUrl = args[++i];
   }
   return { transport, options };
+}
+
+async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string | null> {
+  console.log("\n  Ollama models — press ENTER for latest:\n");
+
+  const MAX_DISPLAY = 10;
+  const displayModels = models.slice(0, MAX_DISPLAY);
+  const overflow = models.length - MAX_DISPLAY;
+
+  for (let i = 0; i < displayModels.length; i++) {
+    const m = displayModels[i];
+    const label = i === 0 ? "[default — latest]" : "";
+    const size = formatSize(m.size);
+    const tag = m.isLocal ? "local" : "cloud";
+    console.log(`  ${i + 1}. ${m.name} ${label}`);
+    if (m.parameterSize) console.log(`     ${m.parameterSize}, ${size}, ${tag}`);
+    else console.log(`     ${size}, ${tag}`);
+  }
+
+  if (overflow > 0) console.log(`\n  ... and ${overflow} more models`);
+
+  const choice = await askOptional("Select [1-${displayModels.length}, Enter for default]");
+  if (!choice) return models[0].name;
+
+  const idx = parseInt(choice) - 1;
+  if (idx >= 0 && idx < displayModels.length) return displayModels[idx].name;
+
+  return models[0].name;
 }
 
 async function pickTransport(): Promise<TransportType | null> {
@@ -393,7 +440,8 @@ async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
 }
 
 function createInvoke(config: SentinelConfig) {
-  return createTransport(config.transport, config.apiKey, config.baseUrl, config.model).invoke.bind(createTransport(config.transport, config.apiKey, config.baseUrl, config.model));
+  const transport = createTransport(config.transport, config.apiKey, config.baseUrl, config.model);
+  return transport.invoke.bind(transport);
 }
 
 async function enter(org: Org, invoke: (p: string) => Promise<string>, config: SentinelConfig) {
@@ -467,8 +515,13 @@ function printHelp() {
 SENTINEL FARM — my-org bootstrap + recursive orchestration + directed evolution
 
 USAGE:
-  farm launch [transport] [--model <model>] [--api-key <key>]
+  farm launch [transport] [--backend ollama] [--model <model>] [--api-key <key>]
     Configure and launch with a specific transport.
+    --backend ollama  Use ollama as model backend (auto-discovers available models)
+
+    farm launch pi --backend ollama
+    farm launch opencode --backend ollama --model llama3.1
+    farm launch claude
 
   farm evolve <tool-path> [--generations N] [--budget M]
     Directed evolution: mutate persona/protocol, verify, keep improvements.
@@ -502,8 +555,10 @@ AVAILABLE TRANSPORTS:
   openai    OpenAI CLI
   copilot   GitHub Copilot CLI
   hermes    Hermes AI agent
-  ollama    Ollama local models
   bun       Direct API (zero deps)
+
+BACKENDS:
+  --backend ollama    Use Ollama for models (requires ollama running)
 `);
 }
 
