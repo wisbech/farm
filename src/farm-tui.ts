@@ -1,10 +1,12 @@
 // Sentinel Farm TUI — agent harness with real-time output
-//
-// Alternate-screen terminal UI:
-//   [status bar    ]
-//   [agent output  ]
-//   [command input ]
+// Built on pi-tui for differential rendering + synchronized output
 
+import {
+  TUI, ProcessTerminal, Text, TruncatedText, Input,
+  type Component, Container,
+  Key, matchesKey,
+} from "@earendil-works/pi-tui";
+import chalk from "chalk";
 import { loadState, saveState, addToHistory, findPersona, type FarmState } from "./farm-state";
 import { startAgent, type TransportProcess } from "./farm-runner";
 import type { SentinelConfig } from "./config";
@@ -14,16 +16,12 @@ let state: FarmState;
 let config: SentinelConfig | null;
 let agent: TransportProcess | null = null;
 let outputLines: string[] = [];
-let scrollOffset = 0;
-let width = 80;
-let height = 24;
 let running = false;
-let promptText = "";
-let escBuffer: string | null = null;
-let escTimer: ReturnType<typeof setTimeout> | null = null;
 
-type ViewTab = "chat" | "personas" | "history";
+type ViewTab = "chat" | "personas";
 let activeTab: ViewTab = "chat";
+
+// ── Entry ──
 
 export async function tuiEntry() {
   config = await loadConfig();
@@ -35,114 +33,70 @@ export async function tuiEntry() {
     if (config.backend) state.backend = config.backend;
   }
 
-  // Enter alternate screen
-  process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J");
+  const terminal = new ProcessTerminal();
+  const tui = new TUI(terminal);
 
-  // Handle terminal resize
-  process.stdout.on("resize", () => {
-    width = process.stdout.columns || 100;
-    height = process.stdout.rows || 30;
-    render();
+  // Status bar
+  const statusBar = new TruncatedText(buildStatusLine(), 0, 0);
+  tui.addChild(statusBar);
+
+  // Output area
+  const outputText = new Text("", 0, 0);
+  tui.addChild(outputText);
+
+  // Footer
+  const footer = new TruncatedText(buildFooter(), 0, 0);
+  tui.addChild(footer);
+
+  // Input
+  const input = new Input();
+  input.onSubmit = (cmd: string) => handleCommand(cmd, tui, statusBar, outputText, footer, input);
+  tui.addChild(input);
+  tui.setFocus(input);
+
+  // Global keyboard
+  tui.addInputListener((data: string) => {
+    if (matchesKey(data, Key.ctrl("c"))) return terminate();
+    if (matchesKey(data, Key.ctrl("t"))) { compact(tui, statusBar, footer); return; }
   });
 
-  width = process.stdout.columns || 100;
-  height = process.stdout.rows || 30;
-
-  // Set up stdin for keyboard
-  const stdin = process.stdin;
-  stdin.setRawMode(true);
-  stdin.resume();
-
-  render();
-
-  stdin.on("data", (buf: Buffer) => {
-    let key = buf.toString();
-
-    // Buffer escape sequences that may arrive split across events
-    if (escBuffer !== null) {
-      key = escBuffer + key;
-      escBuffer = null;
-      if (escTimer) { clearTimeout(escTimer); escTimer = null; }
-    }
-
-    if (key === "\x03") terminate();      // Ctrl+C → quit
-    else if (key === "\x04" && !promptText) terminate(); // Ctrl+D on empty → quit
-    else if (key === "\r" || key === "\n") submitCommand();
-    else if (key === "\x7f" || key === "\b") { if (promptText) promptText = promptText.slice(0, -1); render(); }
-    else if (key === "\x14") { if (agent && running) agent.send("/compact"); addToHistory(state, "[compact]"); promptText = ""; render(); }
-    else if (key === "\x01") activeTab = "personas";
-    else if (key === "\x02") activeTab = "history";
-    else if (key === "\x1b") {
-      // Could be lone Esc or start of escape sequence — buffer and wait
-      escBuffer = "\x1b";
-      escTimer = setTimeout(() => {
-        if (escBuffer === "\x1b") { escBuffer = null; activeTab = "chat"; render(); }
-        escTimer = null;
-      }, 20);
-    }
-    // Full escape sequences (arrow keys arrive complete)
-    else if (key === "\x1b[A") { scrollOffset = Math.min(scrollOffset + 1, Math.max(0, outputLines.length - bodyHeight())); render(); }
-    else if (key === "\x1b[B") { scrollOffset = Math.max(0, scrollOffset - 1); render(); }
-    // Partial escape seq continuation (e.g., "[A" after buffered \x1b)
-    else if (key.startsWith("\x1b[") && key.length >= 3 && key.length <= 4) {
-      const code = key.charCodeAt(2);
-      if (code === 65) { scrollOffset = Math.min(scrollOffset + 1, Math.max(0, outputLines.length - bodyHeight())); render(); }
-      else if (code === 66) { scrollOffset = Math.max(0, scrollOffset - 1); render(); }
-      // C/D ignored — not used
-    }
-    else if (key.length === 1 && key >= " ") { promptText += key; render(); }
-  });
+  tui.start();
 }
 
-function bodyHeight() { return Math.max(4, height - 5); }
+// ── UI Helpers ──
 
-function render() {
-  const statusLine = ` Sentinal Farm · ${state.transport}${state.backend ? " via " + state.backend : ""} · ${state.model} ${running ? " ● running" : ""} ${agent ? " · Ctrl+T compact" : ""} ${" ".repeat(Math.max(0, width - 70))}`;
-
-  const bodyH = bodyHeight();
-  const visible = outputLines.slice(-(bodyH + scrollOffset), scrollOffset ? -scrollOffset : undefined);
-  const body = visible.map(l => l.length > width - 2 ? l.slice(0, width - 3) : l);
-
-  const inputLine = ` > ${promptText}${running ? "" : " "}`;
-  const footer = footerContent();
-
-  // Compose output
-  const frame = [
-    `\x1b[2J\x1b[H`,                              // clear + home
-    `\x1b[1;37;44m${pad(statusLine)}\x1b[0m\n`,   // status bar
-    ...body.map(l => ` ${l}\n`),                      // agent output
-    `\x1b[1;37m${pad(inputLine)}\x1b[0m\n`,         // input line
-    `\x1b[2;37m${pad(footer)}\x1b[0m`,               // footer
-  ].join("");
-
-  process.stdout.write(frame);
+function buildStatusLine(): string {
+  const backend = state.backend ? chalk.dim(` via ${state.backend}`) : "";
+  const active = running ? chalk.green(" ● running") : "";
+  const info = agent ? ` ${chalk.dim("Ctrl+T compact")}` : "";
+  return ` ${chalk.white.bgBlue(" Sentinel Farm ")} ${state.transport}${backend} · ${state.model}${active}${info}`;
 }
 
-function footerContent(): string {
-  const personCount = state.personas.length;
-  const histCount = state.history.length;
-  const tabs = [
-    activeTab === "chat" ? "\x1b[7m Chat \x1b[0m" : " Chat ",
-    activeTab === "personas" ? `\x1b[7m Personas(${personCount}) \x1b[0m` : ` Personas(${personCount}) `,
-    activeTab === "history" ? `\x1b[7m History \x1b[0m` : " History ",
-    width > 60 ? `  running: ${state.running} | out: ${outputLines.length} lines` : "",
-  ].join(" ");
-  return tabs;
+function buildFooter(): string {
+  const chatHl = activeTab === "chat" ? chalk.bgWhite.black(" Chat ") : chalk.dim(" Chat ");
+  const persHl = activeTab === "personas" ? chalk.bgWhite.black(` Personas(${state.personas.length}) `) : chalk.dim(` Personas(${state.personas.length}) `);
+  const stats = chalk.dim(`running: ${state.running} | lines: ${outputLines.length}`);
+  return ` ${chatHl} ${persHl}   ${stats}`;
 }
 
-function pad(s: string) {
-  return s.length >= width ? s : s + " ".repeat(Math.max(0, width - s.length));
+function updateUI(tui: TUI, statusBar: TruncatedText, outputText: Text, footer: TruncatedText) {
+  statusBar.setText(buildStatusLine());
+  const visible = outputLines.slice(-30).join("\n");
+  outputText.setText(visible);
+  footer.setText(buildFooter());
+  tui.requestRender();
 }
 
-function submitCommand() {
-  const cmd = promptText.trim();
-  promptText = "";
+// ── Command Handling ──
 
+function handleCommand(cmd: string, tui: TUI, statusBar: TruncatedText, outputText: Text, footer: TruncatedText, input: Input) {
+  cmd = cmd.trim();
   if (!cmd) return;
 
   if (cmd.startsWith("/")) {
     const parts = cmd.slice(1).split(" ");
-    handleSlashCommand(parts);
+    handleSlashCommand(parts, tui, statusBar, outputText, footer);
+    updateUI(tui, statusBar, outputText, footer);
     return;
   }
 
@@ -153,24 +107,22 @@ function submitCommand() {
       state.backend,
       (text: string) => {
         outputLines.push(...text.split("\n"));
-        if (outputLines.length > 2000) outputLines = outputLines.slice(-2000);
-        render();
+        if (outputLines.length > 5000) outputLines = outputLines.slice(-5000);
+        updateUI(tui, statusBar, outputText, footer);
       },
       (code: number | null) => {
         running = false;
         state.running = Math.max(0, state.running - 1);
-        addToHistory(state, `Agent exited (${code})`);
+        addToHistory(state, `Agent exited (${code ?? "? "})`);
         agent = null;
-        render();
+        updateUI(tui, statusBar, outputText, footer);
       }
     );
     running = true;
     state.running++;
     addToHistory(state, `Started: ${state.transport} ${state.model}`);
-    render();
   }
 
-  // Route to agent
   const persona = findPersona(cmd.split(" ")[0], state.personas);
   const wrapped = persona
     ? `[AS: ${persona.name} — ${persona.traits}]\n\n${cmd}\n\nRespond directly. No preamble.`
@@ -178,33 +130,47 @@ function submitCommand() {
 
   agent!.send(wrapped);
   addToHistory(state, cmd.slice(0, 120));
-  render();
+  outputLines.push(chalk.cyan(`▸ ${wrapped.length > 300 ? wrapped.slice(0, 300) + "..." : wrapped}`));
+  updateUI(tui, statusBar, outputText, footer);
 }
 
-function handleSlashCommand(parts: string[]) {
+// ── Slash Commands ──
+
+function handleSlashCommand(parts: string[], tui: TUI, statusBar: TruncatedText, outputText: Text, footer: TruncatedText) {
   const cmd = parts[0];
 
   if (cmd === "persona" || cmd === "p") {
     if (parts.length >= 3) {
       state.personas.push({ name: parts[1], role: parts.slice(2).join(" "), traits: "general" });
       saveState(state);
+      outputLines.push(chalk.green(`  ✓ Registered persona: ${parts[1]}`));
     } else {
-      // List personas
-      for (const p of state.personas) outputLines.push(`  ${p.name} — ${p.role} (${p.traits})`);
+      for (const p of state.personas) {
+        outputLines.push(chalk.white(`  ${p.name}`) + chalk.dim(` — ${p.role} (${p.traits})`));
+      }
     }
   } else if (cmd === "compact") {
     if (agent) agent.send("/compact");
     addToHistory(state, "/compact");
+    outputLines.push(chalk.yellow("  ⟳ Compact sent"));
   } else if (cmd === "stop" || cmd === "quit") {
     terminate();
   } else {
-    outputLines.push(`  Unknown command: /${cmd}`);
+    outputLines.push(chalk.red(`  Unknown command: /${cmd}`));
   }
-  render();
+  updateUI(tui, statusBar, outputText, footer);
+}
+
+// ── Actions ──
+
+function compact(tui: TUI, statusBar: TruncatedText, footer: TruncatedText) {
+  if (agent && running) agent.send("/compact");
+  addToHistory(state, "[compact]");
+  outputLines.push(chalk.yellow("  ⟳ Compact"));
+  updateUI(tui, statusBar, {} as Text, footer);
 }
 
 function terminate() {
   if (agent) { try { agent.close(); } catch {} }
-  process.stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m\n");
   process.exit(0);
 }
