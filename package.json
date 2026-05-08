@@ -1,32 +1,28 @@
 {
   "name": "farm",
   "version": "1.0.0",
-  "description": "Sentinel Farm — my-org bootstrap, recursive agent orchestration, and directed evolution harness",
-  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wisbech/farm.git"
+  },
+  "main": "dist/index.js",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
   "bin": {
     "farm": "dist/index.js"
   },
-  "main": "dist/index.js",
+  "description": "Sentinel Farm — my-org bootstrap, recursive agent orchestration, and directed evolution harness",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "files": [
     "dist",
     "docs",
     "LICENSE",
     "README.md"
   ],
-  "scripts": {
-    "start": "bun run src/index.ts",
-    "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm --banner '#!/usr/bin/env bun' && chmod +x dist/index.js",
-    "clean": "rm -rf dist",
-    "test": "bun test",
-    "prepublishOnly": "npm run clean && npm run build && bun test"
-  },
-  "dependencies": {
-    "@earendil-works/pi-tui": "^0.74.0"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
+  "homepage": "https://github.com/wisbech/farm",
   "keywords": [
     "ai-agent",
     "my-org",
@@ -39,13 +35,14 @@
     "directed-evolution",
     "dark-software-factory"
   ],
-  "homepage": "https://github.com/wisbech/farm",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/wisbech/farm.git"
-  },
   "license": "MIT",
-  "engines": {
-    "bun": ">=1.0.0"
-  }
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm --banner '#!/usr/bin/env bun' && chmod +x dist/index.js",
+    "clean": "rm -rf dist",
+    "test": "bun test",
+    "prepublishOnly": "npm run clean && npm run build && bun test"
+  },
+  "type": "module"
 }

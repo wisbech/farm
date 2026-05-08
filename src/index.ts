@@ -1,23 +1,10 @@
-import { detect } from "./scanner";
-import { create, inferBlueprint } from "./bootstrap";
-import { harness } from "./harness";
-import { createTransport } from "./transport";
-import {
-  loadConfig, saveConfig, defaultsFor, allTransports,
-  detectAvailable, listOllamaModels, formatSize,
-  type SentinelConfig,
-} from "./config";
+import { loadConfig, saveConfig, defaultsFor, allTransports, listOllamaModels, formatSize, type SentinelConfig } from "./config";
 import type { OllamaModel } from "./config";
-import { bus } from "./bus";
-import type { Org, Task, TransportType } from "./types";
-
-import { evolve } from "./farm-evolve";
-import { distill } from "./farm-distiller";
-import { generateBenchmark, runBenchmark } from "./farm-bench";
-import { inventTool } from "./farm-toolsmith";
-import { createAssemblyLine, autoEvolveLoop } from "./farm-assembly";
-import { getDB } from "./farm-db";
-import { tuiEntry } from "./farm-tui";
+import type { TransportType } from "./types";
+import { loadState, findPersona } from "./farm-state";
+import { createSerf, serfSessionName, listSerfs, killSerf, killAllSerfs, attachSerf, sendToSerf, capturePane, waitForSerfIdle } from "./farm-session";
+import { harness } from "./harness";
+import type { Org, Task } from "./types";
 
 const ARGS = process.argv.slice(2);
 const ROOT = process.cwd();
@@ -27,207 +14,26 @@ async function main() {
   const cmdArgs = ARGS.slice(1);
 
   switch (cmd) {
-    case "launch":
-      await handleLaunch(cmdArgs);
-      return;
-    case "evolve":
-      await handleEvolve(cmdArgs);
-      return;
-    case "distill":
-      await handleDistill(cmdArgs);
-      return;
-    case "bench":
-      await handleBench(cmdArgs);
-      return;
-    case "assembly":
-    case "farm":
-      await handleAssembly(cmdArgs);
-      return;
-    case "tools":
-      await handleTools(cmdArgs);
-      return;
-    case "machines":
-      await handleMachinesList();
-      return;
-    case "--bootstrap":
-    case "-b":
-      await handleBootstrap(cmdArgs.join(" "));
-      return;
+    case "launch":   await handleLaunch(cmdArgs); return;
+    case "serf":     await handleSerf(cmdArgs); return;
+    case "list":     await handleList(); return;
+    case "spawn":    await handleSpawn(cmdArgs); return;
+    case "harvest":  await handleHarvest(cmdArgs); return;
+    case "kill":     await handleKill(cmdArgs); return;
+    case "evolve":   await handleEvolve(cmdArgs); return;
+    case "distill":  console.log("farm distill coming soon — use harvest first"); return;
+    case "bench":    console.log("farm bench coming soon — use harvest first"); return;
+    case "assembly": console.log("farm assembly coming soon — use harvest first"); return;
+    case "tools":    console.log("farm tools coming soon — use harvest first"); return;
+    case "machines": console.log("farm machines coming soon — use harvest first"); return;
     case "help":
     case "--help":
     case "-h":
-      printHelp();
-      return;
-  }
-
-  await handleDefault(cmdArgs);
-}
-
-// ── FARM COMMANDS ──────────────────────────────────────────
-
-async function handleEvolve(args: string[]) {
-  const [target, ...rest] = args;
-  if (!target) { console.log("Usage: farm evolve <tool-path> [--generations N] [--budget M]"); process.exit(1); }
-
-  const config = await configOrExit();
-  const org = await orgOrExit();
-  const invoke = createInvoke(config);
-
-  const opts = parseEvolveOpts(rest);
-  const result = await evolve(target, opts, org, invoke);
-
-  console.log(`\n━━━ Evolution Complete ━━━`);
-  console.log(`  Best:   ${result.bestVariant.metric.toFixed(3)}`);
-  console.log(`  Generations: ${result.history.filter(g => g.shadowPassed).length}/${result.history.length} passed shadow`);
-  const improved = result.history.filter(g => g.shadowPassed && g.metric > result.history[0]?.metric);
-  console.log(`  Improved: ${improved.length}`);
-  console.log(`  Time:    ${(result.elapsed / 1000).toFixed(1)}s`);
-}
-
-function parseEvolveOpts(args: string[]) {
-  const opts: any = {};
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--generations" || args[i] === "-g") opts.generations = parseInt(args[++i]) || 10;
-    else if (args[i] === "--budget" || args[i] === "-b") opts.budget = parseFloat(args[++i]) || 0;
-    else if (args[i] === "--metric" || args[i] === "-m") opts.metric = args[++i];
-  }
-  return opts;
-}
-
-async function handleDistill(args: string[]) {
-  const [target] = args;
-  if (!target) { console.log("Usage: farm distill <tool-path>"); process.exit(1); }
-
-  const config = await configOrExit();
-  const org = await orgOrExit();
-  const invoke = createInvoke(config);
-
-  const result = await distill(target, org, invoke);
-  if (!result) process.exit(1);
-
-  console.log(`\n━━━ Distilled State Machine: ${target} ━━━`);
-  for (const s of result.states) {
-    console.log(`\n  ${s.name}:`);
-    console.log(`    Triggers: ${s.triggers.join(", ")}`);
-    console.log(`    Actions:  ${s.actions.join(", ")}`);
-    console.log(`    Exits:    ${s.exits.map(e => `${e.trigger} \u2192 ${e.to}`).join(", ")}`);
-  }
-  console.log(`\n  Metric: ${result.metric.toFixed(3)}`);
-}
-
-async function handleBench(args: string[]) {
-  const sub = args[0];
-  const rest = args.slice(1);
-  const config = await configOrExit();
-  const org = await orgOrExit();
-  const invoke = createInvoke(config);
-
-  if (sub === "generate" || sub === "gen") {
-    const [researchPath] = rest;
-    if (!researchPath) { console.log("Usage: farm bench generate <research-path>"); process.exit(1); }
-    const bench = await generateBenchmark(researchPath, org, invoke);
-    console.log(`\n━━━ Benchmark Generated ━━━`);
-    console.log(`  ID:  ${bench.id}`);
-    const t1 = bench.questions.filter(q => q.tier === 1).length;
-    const t2 = bench.questions.filter(q => q.tier === 2).length;
-    const t3 = bench.questions.filter(q => q.tier === 3).length;
-    console.log(`  Qs:  ${bench.questions.length} (T1:${t1}, T2:${t2}, T3:${t3})`);
-  } else if (sub === "run") {
-    const [benchId, toolPath] = rest;
-    if (!benchId || !toolPath) { console.log("Usage: farm bench run <bench-id> <tool-path>"); process.exit(1); }
-    const result = await runBenchmark(benchId, toolPath, org, invoke);
-    if (!result) process.exit(1);
-    console.log(`\n━━━ Benchmark Result ━━━`);
-    console.log(`  Accuracy: ${(result.accuracy * 100).toFixed(1)}%`);
-    console.log(`  T1: ${(result.perTier[0]?.accuracy * 100).toFixed(0)}%  T2: ${(result.perTier[1]?.accuracy * 100).toFixed(0)}%  T3: ${(result.perTier[2]?.accuracy * 100).toFixed(0)}%`);
-  } else if (sub === "list") {
-    const db = getDB(org.root);
-    const { getBenchmarks } = await import("./farm-db");
-    const benches = getBenchmarks(db);
-    console.log(`\n━━━ Benchmarks ━━━`);
-    for (const b of benches) console.log(`  ${b.id} \u2014 ${b.domain} (${b.questions.length} questions)`);
-    if (benches.length === 0) console.log("  No benchmarks yet. Run 'farm bench generate <path>' to create.");
-  } else {
-    console.log("Usage: farm bench [generate|run|list]");
+    default:         printHelp(); return;
   }
 }
 
-async function handleAssembly(args: string[]) {
-  const [division, ...rest] = args;
-  const config = await configOrExit();
-  const org = await orgOrExit();
-  const invoke = createInvoke(config);
-
-  const autoEvolve = rest.includes("--auto-evolve");
-  let interval = 60;
-  const intIdx = rest.indexOf("--interval");
-  if (intIdx >= 0) interval = parseInt(rest[intIdx + 1]) || 60;
-
-  if (division && ["strategy", "intelligence", "engineering", "commercial"].includes(division)) {
-    const line = await createAssemblyLine(division as any, { autoEvolve, evolutionInterval: interval }, org);
-    console.log(`\n━━━ Assembly: ${division}/ ━━━`);
-    console.log(`  Tools:  ${line.machineTools.length}`);
-    console.log(`  Gates:  ${line.qualityGates.map(g => g.name).join(", ")}`);
-    console.log(`  Auto:   ${line.autoEvolve ? `every ${line.evolutionInterval}m` : "off"}`);
-
-    if (line.autoEvolve) await autoEvolveLoop(line, org, invoke);
-  } else {
-    console.log("Usage: farm assembly <division> [--auto-evolve] [--interval N]");
-  }
-}
-
-async function handleTools(args: string[]) {
-  const [domain, ...rest] = args;
-  if (!domain) { console.log("Usage: farm tools <domain> [constraints...]"); process.exit(1); }
-
-  const config = await configOrExit();
-  const org = await orgOrExit();
-  const invoke = createInvoke(config);
-
-  const tool = await inventTool(domain, rest.join(" ") || "General purpose", org, invoke);
-  if (!tool) process.exit(1);
-
-  console.log(`\n━━━ Tool Invented ━━━`);
-  console.log(`  Name: ${tool.name}`);
-  console.log(`  Lang: ${tool.language}`);
-  console.log(`  Path: ${tool.path}`);
-  console.log(`  Desc: ${tool.description}`);
-}
-
-async function handleMachinesList() {
-  const org = await orgOrExit();
-  const { readdirSync, existsSync, readFileSync } = require("node:fs");
-  const { join } = require("node:path");
-  const dir = join(org.root, ".sentinel", "machines");
-  console.log(`\n━━━ Distilled Machines ━━━`);
-  if (existsSync(dir)) {
-    const files = readdirSync(dir).filter((f: string) => f.endsWith(".json"));
-    if (files.length === 0) {
-      console.log("  No machines distilled yet. Run 'farm distill <tool>' to create one.");
-      return;
-    }
-    for (const f of files) {
-      const content = JSON.parse(readFileSync(join(dir, f), "utf-8"));
-      console.log(`  ${f.replace(".json", "")} \u2014 ${content.states?.length || 0} states`);
-    }
-  } else {
-    console.log("  No machines distilled yet. Run 'farm distill <tool>' to create one.");
-  }
-}
-
-async function configOrExit(): Promise<any> {
-  const config = await loadConfig();
-  if (!config) { console.log("No config. Run 'farm launch' first."); process.exit(1); }
-  return config;
-}
-
-async function orgOrExit(): Promise<Org> {
-  const org = await detect(ROOT);
-  if (!org) { console.log("No my-org structure. Run 'farm --bootstrap' first."); process.exit(1); }
-  return org;
-}
-
-// ── LAUNCH COMMAND ─────────────────────────────────────────────
+// ── LAUNCH ──
 
 async function handleLaunch(args: string[]) {
   const { transport: explicitTransport, options } = parseLaunchArgs(args);
@@ -280,11 +86,6 @@ async function handleLaunch(args: string[]) {
     let apiKey: string | undefined;
     let baseUrl: string | undefined;
 
-    if (transport === "bun") {
-      const key = await askOptional("API key (leave empty to use env var)");
-      if (key) apiKey = key;
-    }
-
     config = { transport, model, apiKey, baseUrl, updated: new Date().toISOString() };
   }
 
@@ -294,10 +95,208 @@ async function handleLaunch(args: string[]) {
   console.log(`  Model:     ${config.model}`);
   if (config.apiKey) console.log(`  API Key:   [set]`);
   if (config.baseUrl) console.log(`  Base URL:  ${config.baseUrl}`);
-  console.log();
 
-  await tuiEntry();
+  // Launch serfs
+  const state = loadState();
+  const detach = args.includes("--detach");
+
+  if (detach) {
+    console.log(`\nStarting ${state.personas.length} serfs in detached mode...`);
+  } else {
+    console.log(`\nStarting ${state.personas.length} serfs...`);
+  }
+
+  const sessions: string[] = [];
+  for (const persona of state.personas) {
+    const result = createSerf(persona, config.transport, config.model, config.backend);
+    if (result.ok) {
+      sessions.push(result.session);
+      console.log(`  ✓ ${persona.name} → ${result.session}`);
+    } else {
+      console.log(`  ✗ ${persona.name}: ${result.error}`);
+    }
+  }
+
+  if (detach) {
+    console.log(`\nSerfs running in background. Use 'farm serf' to attach, 'farm list' to view.`);
+    console.log(`  Ctrl+B D to detach, 'farm kill --all' to stop.`);
+    process.exit(0);
+  }
+
+  console.log(`\nSerfs are working.`);
+  const choice = await ask(`[1] Attach to a serf  [2] Leave detached  [Q] Quit`);
+  if (choice === "1") {
+    if (sessions.length === 1) {
+      attachSerf(sessions[0]);
+    } else {
+      // Let user pick which serf to attach to
+      console.log("\nSerfs:");
+      sessions.forEach((s, i) => console.log(`  ${i + 1}. ${s}`));
+      const pick = await ask(`Attach to [1-${sessions.length}]`);
+      const idx = parseInt(pick) - 1;
+      if (idx >= 0 && idx < sessions.length) {
+        attachSerf(sessions[idx]);
+      }
+    }
+  } else {
+    console.log("\nSerfs running in background.");
+    console.log("  farm serf         — attach to a serf");
+    console.log("  farm list         — view all serfs");
+    console.log("  farm spawn <serf> <task>  — send task to serf");
+    console.log("  farm kill --all   — stop all serfs");
+    process.exit(0);
+  }
 }
+
+// ── SERF ──
+
+async function handleSerf(args: string[]) {
+  if (args.length > 0) {
+    const slug = args[0];
+    const session = `farm-${slug}`;
+    const serfs = listSerfs();
+    const found = serfs.find(s => s.session === session);
+    if (found && found.status === "running") {
+      attachSerf(session);
+    } else {
+      console.log(`Serf "${slug}" not found or not running.\nUse 'farm list' to see active serfs.`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  const serfs = listSerfs();
+  if (serfs.every(s => s.status === "dead")) {
+    console.log("No serfs running. Run 'farm launch pi' to start.");
+    process.exit(1);
+  }
+
+  await pickSerfInteractive(serfs.filter(s => s.status === "running"));
+}
+
+// ── LIST ──
+
+function handleList() {
+  const serfs = listSerfs();
+  console.log("\n  Farm Serfs — Sentinel Farm\n");
+  for (const s of serfs) {
+    const status = s.status === "running" ? "\x1b[32m●\x1b[0m" : "\x1b[31m○\x1b[0m";
+    const lineInfo = s.lines > 0 ? ` · ${s.lines} lines` : "";
+    console.log(`  ${status} ${s.name}  (${s.session})${lineInfo}`);
+  }
+  if (serfs.every(s => s.status === "dead")) {
+    console.log("\n  No serfs running. Run 'farm launch pi' to start.");
+  } else {
+    console.log(`\n  farm serf          attach to a serf`);
+    console.log(`  farm spawn <serf> <task>  send work to serf`);
+    console.log(`  farm harvest <task>       distribute work across serfs`);
+    console.log(`  farm kill --all           stop all serfs`);
+  }
+  console.log("");
+}
+
+// ── SPAWN ──
+
+function handleSpawn(args: string[]) {
+  if (args.length < 2) {
+    console.log("Usage: farm spawn <serf-name> <task>");
+    process.exit(1);
+  }
+
+  const serfName = args[0];
+  const task = args.slice(1).join(" ");
+  const session = serfSessionName(serfName);
+
+  const serfs = listSerfs();
+  const found = serfs.find(s => s.session === session);
+
+  if (!found || found.status !== "running") {
+    console.log(`Serf "${serfName}" not running.`);
+    console.log("Running serfs:", serfs.filter(s => s.status === "running").map(s => s.name).join(", ") || "none");
+    process.exit(1);
+  }
+
+  sendToSerf(session, task);
+  console.log(`Sent to ${serfName}: ${task}`);
+}
+
+// ── HARVEST ──
+
+async function handleHarvest(args: string[]) {
+  if (args.length === 0) {
+    console.log("Usage: farm harvest <task description>");
+    process.exit(1);
+  }
+
+  const taskDesc = args.join(" ");
+  const config = await loadConfig();
+  if (!config) {
+    console.log("No config. Run 'farm launch' first.");
+    process.exit(1);
+  }
+
+  const serfs = listSerfs();
+  const running = serfs.filter(s => s.status === "running");
+  if (running.length === 0) {
+    console.log("No serfs running. Run 'farm launch pi --detach' first.");
+    process.exit(1);
+  }
+
+  // Build a synthetic Org from running serfs
+  const org = await buildOrgFromSerfs(running, config);
+
+  console.log(`\n  ▶ ${taskDesc}\n`);
+  console.log(`  Harnessing ${running.length} serfs...\n`);
+
+  const task: Task = {
+    id: `task-${Date.now()}`,
+    description: taskDesc,
+    division: "intelligence",
+    complexity: "composite",
+    status: "pending",
+  };
+
+  try {
+    const invoke = createInvoke(config);
+    const result = await harness(task, org, invoke);
+    console.log(`\n━━━ Harvest Complete ━━━`);
+    console.log(formatResult(result.content));
+  } catch (err) {
+    console.error(`\n  Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ── KILL ──
+
+function handleKill(args: string[]) {
+  if (args.includes("--all")) {
+    const killed = killAllSerfs();
+    console.log(`Killed ${killed} serfs.`);
+    return;
+  }
+
+  if (args.length === 0) {
+    console.log("Usage: farm kill <serf-name>  or  farm kill --all");
+    process.exit(1);
+  }
+
+  const slug = args[0];
+  const session = `farm-${slug}`;
+  if (killSerf(session)) {
+    console.log(`Killed ${session}.`);
+  } else {
+    console.log(`Serf "${slug}" not found or could not be killed.`);
+  }
+}
+
+// ── EVOLVE (placeholder) ──
+
+async function handleEvolve(args: string[]) {
+  console.log("farm evolve uses the serf sessions for mutation and verification.\nComing soon — use farm harvest first to get results flow working.");
+  process.exit(0);
+}
+
+// ── SHARED HELPERS ──
 
 function parseLaunchArgs(args: string[]) {
   const known = allTransports().map(t => t.key);
@@ -321,23 +320,19 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
   let visible = Math.min(MAX_DISPLAY, models.length);
 
   function render() {
-    // Move cursor to top-left and clear
     process.stdout.write("\x1b[H\x1b[J");
-
     const lines: string[] = [];
-    lines.push("  Ollama models \u2014 \u2191\u2193 to select, Enter to confirm, Esc to quit\n");
+    lines.push("  Ollama models — ↑↓ to select, Enter to confirm, Esc to quit\n");
 
     for (let i = 0; i < visible; i++) {
       const m = models[i];
-      const cursor = i === selectedIdx ? "\u25B6" : " ";
+      const cursor = i === selectedIdx ? "▶" : " ";
       const label = i === 0 ? "(latest)" : "";
       const size = formatSize(m.size);
       const tag = m.isLocal ? "local" : "cloud";
       const isSelected = i === selectedIdx;
-
       const prefix = isSelected ? "\x1b[1;37m\x1b[44m" : "";
       const suffix = isSelected ? "\x1b[0m" : "";
-
       const num = String(i + 1).padStart(2, " ");
       lines.push(`${prefix}  ${cursor} ${num}. ${m.name} ${label}${suffix}`);
       if (m.parameterSize)
@@ -348,10 +343,9 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
 
     const hidden = models.length - visible;
     if (hidden > 0) {
-      const msg = selectedIdx === visible - 1
-        ? `\n  \u25BC Enter to show ${hidden} more`
-        : `\n  \u2026 ${hidden} more (arrow to last)`;
-      lines.push(msg);
+      lines.push(selectedIdx === visible - 1
+        ? `\n  ▼ Enter to show ${hidden} more`
+        : `\n  … ${hidden} more (arrow to last)`);
     }
 
     process.stdout.write(lines.join("\n"));
@@ -368,17 +362,12 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
       stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m");
       stdin.setRawMode(false);
       stdin.removeAllListeners("data");
-      // Yield to let terminal settle before the next readline
       setTimeout(() => resolve(value), 50);
     }
 
     stdin.on("data", (buf: Buffer) => {
       const k = buf.toString();
-
-      if (k === "\x1b[A") {
-        selectedIdx = Math.max(0, selectedIdx - 1);
-        render(); return;
-      }
+      if (k === "\x1b[A") { selectedIdx = Math.max(0, selectedIdx - 1); render(); return; }
       if (k === "\x1b[B") {
         if (selectedIdx === visible - 1 && models.length > visible)
           visible = Math.min(visible + MAX_DISPLAY, models.length);
@@ -395,23 +384,66 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
         return;
       }
       if (k === "\x1b" || k === "\u0003") { done(null); return; }
-
       const n = parseInt(k);
-      if (n >= 1 && n <= Math.min(9, models.length)) {
-        done(models[n - 1].name); return;
-      }
+      if (n >= 1 && n <= Math.min(9, models.length)) { done(models[n - 1].name); return; }
     });
   });
 }
 
+async function pickSerfInteractive(serfs: ReturnType<typeof listSerfs>) {
+  let selectedIdx = 0;
+
+  function render() {
+    process.stdout.write("\x1b[H\x1b[J");
+    const lines: string[] = [];
+    lines.push("  Farm Serfs — ↑↓ to select, Enter to attach, Esc/Ctrl+C to quit\n");
+
+    for (let i = 0; i < serfs.length; i++) {
+      const s = serfs[i];
+      const cursor = i === selectedIdx ? "▶" : " ";
+      const isSelected = i === selectedIdx;
+      const prefix = isSelected ? "\x1b[1;37m\x1b[44m" : "";
+      const suffix = isSelected ? "\x1b[0m" : "";
+
+      lines.push(`${prefix}  ${cursor} ${s.name.padEnd(22)} (${s.session})${suffix}`);
+    }
+
+    process.stdout.write(lines.join("\n"));
+  }
+
+  const { stdin, stdout } = process;
+  stdout.write("\x1b[?25l\x1b[?1049h");
+  stdin.setRawMode(true);
+  stdin.resume();
+  render();
+
+  return new Promise<void>((resolve) => {
+    function done() {
+      stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m");
+      stdin.setRawMode(false);
+      stdin.removeAllListeners("data");
+      setTimeout(() => resolve(), 50);
+    }
+
+    stdin.on("data", (buf: Buffer) => {
+      const k = buf.toString();
+      if (k === "\x1b[A") { selectedIdx = Math.max(0, selectedIdx - 1); render(); return; }
+      if (k === "\x1b[B") { selectedIdx = Math.min(serfs.length - 1, selectedIdx + 1); render(); return; }
+      if (k === "\r" || k === "\n") {
+        done();
+        attachSerf(serfs[selectedIdx].session);
+        return;
+      }
+      if (k === "\x1b" || k === "\u0003") { done(); return; }
+    });
+  });
+}
+
+// Transport picker (standalone, non-interactive)
 async function pickTransport(): Promise<TransportType | null> {
   const all = allTransports();
-  const available = await detectAvailable();
   console.log("Available transports:");
-  all.forEach((t, i) => {
-    const marker = available.includes(t.key) ? " " : "✗";
-    console.log(`  ${i + 1}. ${marker} ${t.label} — ${t.description}`);
-  });
+  all.forEach((t, i) => console.log(`  ${i + 1}. ${t.label} — ${t.description}`));
   console.log("  0. Quit");
 
   const choice = await ask(`Select transport [1-${all.length}]`);
@@ -421,194 +453,84 @@ async function pickTransport(): Promise<TransportType | null> {
   return all[idx - 1].key;
 }
 
-// ── BOOTSTRAP COMMAND ──────────────────────────────────────────
-
-async function handleBootstrap(args: string) {
-  const config = await loadConfig();
-  if (!config) {
-    console.log("No configuration found. Run 'farm launch' first.");
-    process.exit(1);
-  }
-
-  console.log(`Analyzing: "${args}"...`);
-  const invoke = createInvoke(config);
-  const blueprint = await inferBlueprint(args);
-
-  console.log(`\nBlueprint for "${blueprint.name}":`);
-  console.log(`  ${blueprint.description}\n`);
-  for (const div of blueprint.divisions) {
-    console.log(`  ${div.name}/ (${div.purpose})`);
-    for (const agent of div.agents) console.log(`    - ${agent.name}: ${agent.role}`);
-  }
-
-  console.log(`\nBootstrapping ${blueprint.name} in ${ROOT}...`);
-  await create(ROOT, blueprint);
-  console.log("Done. Run 'farm' to start.\n");
-}
-
-// ── DEFAULT COMMAND ────────────────────────────────────────────
-
-async function handleDefault(args: string[]) {
-  const config = await loadConfig();
-  if (!config) {
-    console.log("No configuration found.\n");
-    console.log("Run:  farm launch claude|pi|opencode|codex|openai|hermes|bun [--backend ollama]");
-    console.log("  or: farm launch  (interactive picker)\n");
-    process.exit(1);
-  }
-
-  const org = await detect(ROOT);
-  if (!org) {
-    console.log("No my-org structure detected.");
-    console.log("Run: farm --bootstrap \"Describe what you're building\"");
-    process.exit(1);
-  }
-
-  const invoke = createInvoke(config);
-  const taskDesc = args.join(" ").trim();
-  if (taskDesc) {
-    console.log(`\n  \u25B6 ${taskDesc}\n`);
-    const division = routeToDivision(taskDesc, org);
-    const task: Task = { id: generateId(), description: taskDesc, division, complexity: "composite", status: "pending" };
-    try {
-      const result = await harness(task, org, invoke);
-      console.log(`\n━━━ Result ━━━`);
-      console.log(formatResult(result.content));
-    } catch (err) {
-      console.error(`\n  Error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  } else {
-    await enter(org, invoke, config);
-  }
-}
-
-// ── SHARED ─────────────────────────────────────────────────────
-
-async function detectOrBootstrap(config: SentinelConfig): Promise<Org> {
-  let org = await detect(ROOT);
-  if (org) return org;
-
-  // No workspace — silently create one
-  const invoke = createInvoke(config);
-  const blueprint = await inferBlueprint("an AI-powered knowledge work company");
-  // Don't log during silent bootstrap
-  await create(ROOT, blueprint);
-  org = await detect(ROOT);
-  if (!org) throw new Error("Bootstrap failed — could not detect created structure");
-  return org;
-}
-
 function createInvoke(config: SentinelConfig) {
+  const { createTransport } = require("./transport");
   const transport = createTransport(config.transport, config.apiKey, config.baseUrl, config.model);
   return transport.invoke.bind(transport);
 }
 
-async function enter(org: Org, invoke: (p: string) => Promise<string>, config: SentinelConfig) {
-  const readline = await import("node:readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+async function buildOrgFromSerfs(serfs: ReturnType<typeof listSerfs>, config: SentinelConfig) {
+  const { detect } = require("./scanner");
+  const { create, inferBlueprint } = require("./bootstrap");
 
-  bus.subscribe("log", (msg) => console.log(`  [${msg.from.replace("harness:", "")}] ${msg.content}`));
-  const prompt = (): Promise<string> => new Promise(r => rl.question("\n> ", (a: string) => r(a.trim())));
-
-  console.log(`\nSentinel Farm — ${org.divisions.length} divisions, ${org.personas.length} personas active`);
-  console.log(`Transport: ${config.transport} | Model: ${config.model}`);
-  console.log("Type your task or 'farm evolve <tool>' to start evolution.\n");
-
-  while (true) {
-    const input = await prompt();
-    if (!input) continue;
-    if (input === "quit" || input === "exit" || input === "q") break;
-    if (input === "help" || input === "?") {
-      console.log("\nCommands:");
-      console.log("  <task>              Execute through harness");
-      console.log("  personas             List all personas");
-      console.log("  divisions            List all divisions");
-      console.log("  config               Show configuration");
-      console.log("  help                 This help");
-      console.log("  quit                 Exit");
-      continue;
-    }
-    if (input === "personas") { org.personas.forEach(p => console.log(`  ${p.name} [${p.division}]`)); continue; }
-    if (input === "divisions") { org.divisions.forEach(d => console.log(`  ${d}/ (${org.personas.filter(p => p.division === d).length} agents)`)); continue; }
-    if (input === "config") {
-      console.log(`\n  Transport: ${config.transport}`);
-      console.log(`  Model:     ${config.model}`);
-      if (config.apiKey) console.log("  API Key:   [set]");
-      if (config.baseUrl) console.log(`  Base URL:  ${config.baseUrl}`);
-      continue;
-    }
-
-    console.log(`\n  \u25B6 ${input}\n`);
-    const division = routeToDivision(input, org);
-    const task: Task = { id: generateId(), description: input, division, complexity: "composite", status: "pending" };
-    try {
-      const result = await harness(task, org, invoke);
-      console.log(`\n━━━ Result ━━━`);
-      console.log(formatResult(result.content));
-    } catch (err) {
-      console.error(`\n  Error: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  // Build a synthetic org from running serfs
+  let org = await detect(ROOT);
+  if (!org) {
+    const invoke = createInvoke(config);
+    const blueprint = await inferBlueprint("an AI-powered knowledge work company");
+    await create(ROOT, blueprint);
+    org = await detect(ROOT);
   }
 
-  rl.close();
-  process.exit(0);
-}
+  // Update personas to match serfs
+  if (org) {
+    org.personas = serfs.map(s => ({
+      name: s.persona.name,
+      division: "intelligence",
+      identity: `${s.persona.name} — ${s.persona.role}`,
+      mission: s.persona.role,
+      boundaries: "Operates within the intelligence division",
+      traits: s.persona.traits.split(", "),
+      path: `intelligence/agents/${s.slug}.md`,
+    }));
+  }
 
-async function ask(q: string): Promise<string> {
-  const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(r => rl.question(`${q}: `, (a: string) => { rl.close(); r(a.trim()); }));
-}
-
-async function askOptional(q: string): Promise<string> {
-  const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(r => rl.question(`${q}: `, (a: string) => { rl.close(); r(a.trim()); }));
-}
-
-async function askWithDefault(q: string, def: string): Promise<string> {
-  const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(r => rl.question(`${q} [${def}]: `, (a: string) => { rl.close(); r(a.trim() || def); }));
+  return org || { root: ROOT, divisions: ["intelligence"], personas: [], claudeMd: "", agentsMd: "", routingTable: new Map(), protocol: "" };
 }
 
 function printHelp() {
   console.log(`
-SENTINEL FARM — my-org bootstrap + recursive orchestration + directed evolution
+SENTINEL FARM — my-org bootstrap + serf orchestration + directed evolution
 
 USAGE:
-  farm launch [transport] [--backend ollama] [--model <model>] [--api-key <key>]
-    Configure and launch with a specific transport.
-    --backend ollama  Use ollama as model backend (auto-discovers available models)
+  farm launch [transport] [--backend ollama] [--model <model>] [--detach]
+    Configure and launch serf sessions.
+    --backend ollama  Use ollama as model backend
+    --detach           Start serfs in background, don't attach
 
     farm launch pi --backend ollama
-    farm launch opencode --backend ollama --model llama3.1
+    farm launch pi --backend ollama --detach
     farm launch claude
 
-  farm evolve <tool-path> [--generations N] [--budget M]
-    Directed evolution: mutate persona/protocol, verify, keep improvements.
+  farm serf [serf-name]
+    Attach to a serf session. No name = interactive picker.
 
-  farm distill <tool-path>
-    Distill evolved agent description into formal state machine.
+    farm serf
+    farm serf intel-analyst
 
-  farm bench generate <research-path>
-    Generate ARFBench-style benchmark from research artifacts.
-  farm bench run <bench-id> <tool-path>
-    Run benchmark against a machine tool.
-  farm bench list
+  farm list
+    List all active serfs and their status.
 
-  farm assembly <division> [--auto-evolve] [--interval N]
-    Create and manage division assembly line.
+  farm spawn <serf-name> <task>
+    Send a task into a running serf session.
 
-  farm tools <domain> [constraints...]
-    Invent a new command-line tool for a domain.
+    farm spawn "Intel Analyst" "research competitor X"
 
-  farm machines
-    List all distilled state machines.
+  farm harvest <task>
+    Decompose a task, spawn across serfs, synthesize results.
 
-  farm [--bootstrap "description"] ["task"]
-    Run harness in my-org workspace. Bootstraps if needed.
+    farm harvest "build a market analysis of Y"
+
+  farm kill <serf-name>
+  farm kill --all
+    Kill a specific serf or all serfs.
+
+  farm evolve <tool-path>
+    Directed evolution of personas and protocols (coming soon).
 
 AVAILABLE TRANSPORTS:
-  claude    Claude Code
   pi        Pi coding agent
+  claude    Claude Code
   opencode  OpenCode CLI
   codex     OpenAI Codex
   openai    OpenAI CLI
@@ -621,18 +543,18 @@ BACKENDS:
 `);
 }
 
-function routeToDivision(desc: string, org: Org): Task["division"] {
-  const d = desc.toLowerCase();
-  for (const [pattern, { division }] of org.routingTable) if (d.includes(pattern)) return division;
-  return "intelligence";
-}
-
 function formatResult(text: string): string {
   return text.split("\n").map(l => `  ${l}`).join("\n");
 }
 
-function generateId(): string {
-  return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+async function ask(q: string): Promise<string> {
+  const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(r => rl.question(`${q}: `, (a: string) => { rl.close(); r(a.trim()); }));
+}
+
+async function askWithDefault(q: string, def: string): Promise<string> {
+  const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(r => rl.question(`${q} [${def}]: `, (a: string) => { rl.close(); r(a.trim() || def); }));
 }
 
 main().catch(err => {

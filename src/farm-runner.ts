@@ -1,51 +1,34 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { createSerf, sendToSerf, capturePane, type SerfStatus } from "./farm-session";
+import type { FarmPersona } from "./farm-state";
 
-export interface TransportProcess {
+export interface SerfProcess {
+  session: string;
+  persona: FarmPersona;
   send(input: string): void;
+  read(): string;
   close(): void;
 }
 
-export function spawnTransport(
-  cmd: string,
-  args: string[],
-  onOutput: (text: string) => void,
-  onClose: (code: number | null) => void
-): TransportProcess {
-  const child = spawn(cmd, args, {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
-  });
-
-  let buffer = "";
-
-  child.stdout.on("data", (d: Buffer) => {
-    const text = d.toString();
-    buffer += text;
-
-    // flush on newlines, max 200ms batching
-    if (text.includes("\n") || buffer.length > 2000) {
-      onOutput(buffer);
-      buffer = "";
-    }
-  });
-
-  child.stderr.on("data", (d: Buffer) => {
-    onOutput(`[stderr] ${d.toString()}`);
-  });
-
-  child.on("close", (code) => {
-    if (buffer.length > 0) onOutput(buffer);
-    onClose(code);
-  });
+export function startSerf(
+  persona: FarmPersona,
+  transport: string,
+  model: string,
+  backend?: string,
+): SerfProcess {
+  const result = createSerf(persona, transport, model, backend);
+  if (!result.ok) console.warn(`Serf ${persona.name}: ${result.error}`);
 
   return {
+    session: result.session,
+    persona,
     send(input: string) {
-      if (child.stdin.writable) {
-        child.stdin.write(input + "\n");
-      }
+      sendToSerf(result.session, input);
+    },
+    read(): string {
+      return capturePane(result.session);
     },
     close() {
-      try { child.kill("SIGTERM"); } catch {}
+      // Session persists until killed by farm kill command
     },
   };
 }
@@ -55,42 +38,10 @@ export function startAgent(
   model: string,
   backend?: string,
   onOutput?: (text: string) => void,
-  onClose?: (code: number | null) => void
-): TransportProcess {
-  const noop = () => {};
-  const out = onOutput || noop;
-  const close = onClose || noop;
-
-  switch (transportType) {
-    case "claude":
-      return spawnTransport("claude", [
-        "--model", model,
-      ], out, close);
-
-    case "pi":
-      return spawnTransport("pi", [
-        "--model", model,
-        "--no-skills", "--no-extensions", "--no-context-files",
-      ], out, close);
-
-    case "opencode":
-      return spawnTransport("opencode", [
-        "--model", model,
-      ], out, close);
-
-    case "codex":
-      return spawnTransport("codex", [
-        "exec", "--model", model,
-      ], out, close);
-
-    case "copilot":
-      return spawnTransport("github-copilot-cli", [], out, close);
-
-    case "openai":
-      return spawnTransport("openai", ["--model", model], out, close);
-
-    default:
-      // Try as generic process
-      return spawnTransport(transportType, [], out, close);
-  }
+  onClose?: (code: number | null) => void,
+): { send(input: string): void; close(): void } {
+  return {
+    send(_input: string) {},
+    close() {},
+  };
 }
