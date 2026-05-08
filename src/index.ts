@@ -17,6 +17,7 @@ import { generateBenchmark, runBenchmark } from "./farm-bench";
 import { inventTool } from "./farm-toolsmith";
 import { createAssemblyLine, autoEvolveLoop } from "./farm-assembly";
 import { getDB } from "./farm-db";
+import { tuiEntry } from "./farm-tui";
 
 const ARGS = process.argv.slice(2);
 const ROOT = process.cwd();
@@ -295,15 +296,7 @@ async function handleLaunch(args: string[]) {
   if (config.baseUrl) console.log(`  Base URL:  ${config.baseUrl}`);
   console.log();
 
-  const org = await detect(ROOT);
-  if (!org) {
-    console.log("No workspace detected. Run: farm --bootstrap \"Describe your company\"");
-    console.log("Or run 'farm' to bootstrap a generic workspace.");
-    process.exit(0);
-  }
-
-  const invoke = createInvoke(config);
-  await enter(org, invoke, config);
+  await tuiEntry();
 }
 
 function parseLaunchArgs(args: string[]) {
