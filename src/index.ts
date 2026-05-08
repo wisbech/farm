@@ -1,8 +1,12 @@
 import { loadConfig, saveConfig, defaultsFor, allTransports, listOllamaModels, formatSize, type SentinelConfig } from "./config";
 import type { OllamaModel } from "./config";
 import type { TransportType } from "./types";
-import { loadState, findPersona } from "./farm-state";
-import { createSerf, serfSessionName, listSerfs, killSerf, killAllSerfs, attachSerf, sendToSerf, capturePane, waitForSerfIdle } from "./farm-session";
+import { loadState } from "./farm-state";
+import {
+  createSerf, serfSessionName, listSerfs, killSerf, killAllSerfs,
+  attachSerf, attachDashboard, sendToSerf, capturePane, waitForSerfIdle,
+  ensureDashboard, dashboardExists,
+} from "./farm-session";
 import { harness } from "./harness";
 import type { Org, Task } from "./types";
 
@@ -14,22 +18,23 @@ async function main() {
   const cmdArgs = ARGS.slice(1);
 
   switch (cmd) {
-    case "launch":   await handleLaunch(cmdArgs); return;
-    case "serf":     await handleSerf(cmdArgs); return;
-    case "list":     await handleList(); return;
-    case "spawn":    await handleSpawn(cmdArgs); return;
-    case "harvest":  await handleHarvest(cmdArgs); return;
-    case "kill":     await handleKill(cmdArgs); return;
-    case "evolve":   await handleEvolve(cmdArgs); return;
-    case "distill":  console.log("farm distill coming soon — use harvest first"); return;
-    case "bench":    console.log("farm bench coming soon — use harvest first"); return;
-    case "assembly": console.log("farm assembly coming soon — use harvest first"); return;
-    case "tools":    console.log("farm tools coming soon — use harvest first"); return;
-    case "machines": console.log("farm machines coming soon — use harvest first"); return;
+    case "launch":    await handleLaunch(cmdArgs); return;
+    case "dashboard": await handleDashboard(); return;
+    case "serf":      await handleSerf(cmdArgs); return;
+    case "list":      await handleList(); return;
+    case "spawn":     await handleSpawn(cmdArgs); return;
+    case "harvest":   await handleHarvest(cmdArgs); return;
+    case "kill":      await handleKill(cmdArgs); return;
+    case "evolve":    await handleEvolve(cmdArgs); return;
+    case "distill":   console.log("farm distill coming soon — use harvest first"); return;
+    case "bench":     console.log("farm bench coming soon — use harvest first"); return;
+    case "assembly":  console.log("farm assembly coming soon — use harvest first"); return;
+    case "tools":     console.log("farm tools coming soon — use harvest first"); return;
+    case "machines":  console.log("farm machines coming soon — use harvest first"); return;
     case "help":
     case "--help":
     case "-h":
-    default:         printHelp(); return;
+    default:          printHelp(); return;
   }
 }
 
@@ -75,10 +80,7 @@ async function handleLaunch(args: string[]) {
       : "No saved configuration.\n");
 
     const transport = await pickTransport();
-    if (!transport) {
-      console.log("No transport selected. Exiting.");
-      process.exit(0);
-    }
+    if (!transport) { console.log("No transport selected. Exiting."); process.exit(0); }
 
     const defaults = defaultsFor(transport);
     console.log("");
@@ -99,98 +101,115 @@ async function handleLaunch(args: string[]) {
   // Launch serfs
   const state = loadState();
   const detach = args.includes("--detach");
+  const dashboard = args.includes("--dashboard") || !detach;
 
-  if (detach) {
-    console.log(`\nStarting ${state.personas.length} serfs in detached mode...`);
-  } else {
-    console.log(`\nStarting ${state.personas.length} serfs...`);
-  }
+  console.log(`\nStarting ${state.personas.length} serfs...`);
 
   const sessions: string[] = [];
   for (const persona of state.personas) {
     const result = createSerf(persona, config.transport, config.model, config.backend);
     if (result.ok) {
       sessions.push(result.session);
-      console.log(`  ✓ ${persona.name} → ${result.session}`);
+      console.log(`  ✓ ${persona.name}`);
     } else {
       console.log(`  ✗ ${persona.name}: ${result.error}`);
     }
   }
 
+  if (sessions.length === 0) {
+    console.log("\nNo serfs could be started. Check that transport is installed.");
+    process.exit(1);
+  }
+
   if (detach) {
-    console.log(`\nSerfs running in background. Use 'farm serf' to attach, 'farm list' to view.`);
-    console.log(`  Ctrl+B D to detach, 'farm kill --all' to stop.`);
+    console.log(`\nSerfs detached. farm dashboard to view. farm kill --all to stop.`);
     process.exit(0);
   }
 
-  console.log(`\nSerfs are working.`);
-  const choice = await ask(`[1] Attach to a serf  [2] Leave detached  [Q] Quit`);
-  if (choice === "1") {
-    if (sessions.length === 1) {
-      attachSerf(sessions[0]);
-    } else {
-      // Let user pick which serf to attach to
-      console.log("\nSerfs:");
-      sessions.forEach((s, i) => console.log(`  ${i + 1}. ${s}`));
-      const pick = await ask(`Attach to [1-${sessions.length}]`);
-      const idx = parseInt(pick) - 1;
-      if (idx >= 0 && idx < sessions.length) {
-        attachSerf(sessions[idx]);
-      }
-    }
-  } else {
-    console.log("\nSerfs running in background.");
-    console.log("  farm serf         — attach to a serf");
-    console.log("  farm list         — view all serfs");
-    console.log("  farm spawn <serf> <task>  — send task to serf");
-    console.log("  farm kill --all   — stop all serfs");
-    process.exit(0);
-  }
+  // Build singleton dashboard and enter it
+  console.log(`\nBuilding dashboard...`);
+  ensureDashboard();
+  attachDashboard();
 }
 
-// ── SERF ──
+// ── DASHBOARD ──
+
+async function handleDashboard() {
+  if (!dashboardExists()) {
+    const serfs = listSerfs().filter(s => s.status === "running");
+    if (serfs.length === 0) {
+      console.log("No serfs running. Run 'farm launch pi' to start.");
+      process.exit(1);
+    }
+    ensureDashboard();
+  }
+  attachDashboard();
+}
+
+// ── SERF (attach to single serf, bypass dashboard) ──
 
 async function handleSerf(args: string[]) {
   if (args.length > 0) {
-    const slug = args[0];
-    const session = `farm-${slug}`;
+    const session = `farm-${args[0]}`;
     const serfs = listSerfs();
     const found = serfs.find(s => s.session === session);
     if (found && found.status === "running") {
       attachSerf(session);
     } else {
-      console.log(`Serf "${slug}" not found or not running.\nUse 'farm list' to see active serfs.`);
+      console.log(`Serf "${args[0]}" not running.\nUse 'farm list' to see active serfs.`);
       process.exit(1);
     }
     return;
   }
 
+  // No name given — attach to dashboard if it exists, otherwise show serf picker
+  if (dashboardExists()) {
+    attachDashboard();
+    return;
+  }
+
   const serfs = listSerfs();
-  if (serfs.every(s => s.status === "dead")) {
+  const running = serfs.filter(s => s.status === "running");
+  if (running.length === 0) {
     console.log("No serfs running. Run 'farm launch pi' to start.");
     process.exit(1);
   }
 
-  await pickSerfInteractive(serfs.filter(s => s.status === "running"));
+  // Simple numbered picker (no raw mode) for serf-only mode
+  if (running.length === 1) {
+    attachSerf(running[0].session);
+    return;
+  }
+
+  console.log("\n  Farm Serfs:");
+  running.forEach((s, i) => console.log(`    ${i + 1}. ${s.name} (${s.session})`));
+  const choice = await ask(`Attach to [1-${running.length}]`);
+  const idx = parseInt(choice) - 1;
+  if (idx >= 0 && idx < running.length) {
+    attachSerf(running[idx].session);
+  }
 }
 
 // ── LIST ──
 
 function handleList() {
   const serfs = listSerfs();
-  console.log("\n  Farm Serfs — Sentinel Farm\n");
+  console.log(`\n  Farm Serfs — Sentinel Farm\n`);
   for (const s of serfs) {
     const status = s.status === "running" ? "\x1b[32m●\x1b[0m" : "\x1b[31m○\x1b[0m";
     const lineInfo = s.lines > 0 ? ` · ${s.lines} lines` : "";
     console.log(`  ${status} ${s.name}  (${s.session})${lineInfo}`);
   }
+  if (dashboardExists()) {
+    console.log(`  \x1b[34m■\x1b[0m Dashboard  (farm-dashboard)`);
+  }
   if (serfs.every(s => s.status === "dead")) {
     console.log("\n  No serfs running. Run 'farm launch pi' to start.");
   } else {
-    console.log(`\n  farm serf          attach to a serf`);
-    console.log(`  farm spawn <serf> <task>  send work to serf`);
-    console.log(`  farm harvest <task>       distribute work across serfs`);
-    console.log(`  farm kill --all           stop all serfs`);
+    console.log(`\n  farm dashboard        tiled view · arrows navigate · Enter zoom`);
+    console.log(`  farm spawn <serf> <task>     send work to serf`);
+    console.log(`  farm harvest <task>          distribute work across serfs`);
+    console.log(`  farm kill --all              stop all serfs`);
   }
   console.log("");
 }
@@ -206,13 +225,12 @@ function handleSpawn(args: string[]) {
   const serfName = args[0];
   const task = args.slice(1).join(" ");
   const session = serfSessionName(serfName);
-
   const serfs = listSerfs();
   const found = serfs.find(s => s.session === session);
 
   if (!found || found.status !== "running") {
     console.log(`Serf "${serfName}" not running.`);
-    console.log("Running serfs:", serfs.filter(s => s.status === "running").map(s => s.name).join(", ") || "none");
+    console.log("Running:", serfs.filter(s => s.status === "running").map(s => s.name).join(", ") || "none");
     process.exit(1);
   }
 
@@ -230,10 +248,7 @@ async function handleHarvest(args: string[]) {
 
   const taskDesc = args.join(" ");
   const config = await loadConfig();
-  if (!config) {
-    console.log("No config. Run 'farm launch' first.");
-    process.exit(1);
-  }
+  if (!config) { console.log("No config. Run 'farm launch' first."); process.exit(1); }
 
   const serfs = listSerfs();
   const running = serfs.filter(s => s.status === "running");
@@ -242,9 +257,7 @@ async function handleHarvest(args: string[]) {
     process.exit(1);
   }
 
-  // Build a synthetic Org from running serfs
   const org = await buildOrgFromSerfs(running, config);
-
   console.log(`\n  ▶ ${taskDesc}\n`);
   console.log(`  Harnessing ${running.length} serfs...\n`);
 
@@ -271,7 +284,7 @@ async function handleHarvest(args: string[]) {
 function handleKill(args: string[]) {
   if (args.includes("--all")) {
     const killed = killAllSerfs();
-    console.log(`Killed ${killed} serfs.`);
+    console.log(`Killed ${killed} serfs + dashboard.`);
     return;
   }
 
@@ -289,11 +302,10 @@ function handleKill(args: string[]) {
   }
 }
 
-// ── EVOLVE (placeholder) ──
+// ── EVOLVE ──
 
 async function handleEvolve(args: string[]) {
-  console.log("farm evolve uses the serf sessions for mutation and verification.\nComing soon — use farm harvest first to get results flow working.");
-  process.exit(0);
+  console.log("farm evolve uses the serf sessions for mutation and verification.\nComing soon — use farm harvest first.");
 }
 
 // ── SHARED HELPERS ──
@@ -390,62 +402,11 @@ async function pickOllamaModelInteractive(models: OllamaModel[]): Promise<string
   });
 }
 
-async function pickSerfInteractive(serfs: ReturnType<typeof listSerfs>) {
-  let selectedIdx = 0;
-
-  function render() {
-    process.stdout.write("\x1b[H\x1b[J");
-    const lines: string[] = [];
-    lines.push("  Farm Serfs — ↑↓ to select, Enter to attach, Esc/Ctrl+C to quit\n");
-
-    for (let i = 0; i < serfs.length; i++) {
-      const s = serfs[i];
-      const cursor = i === selectedIdx ? "▶" : " ";
-      const isSelected = i === selectedIdx;
-      const prefix = isSelected ? "\x1b[1;37m\x1b[44m" : "";
-      const suffix = isSelected ? "\x1b[0m" : "";
-
-      lines.push(`${prefix}  ${cursor} ${s.name.padEnd(22)} (${s.session})${suffix}`);
-    }
-
-    process.stdout.write(lines.join("\n"));
-  }
-
-  const { stdin, stdout } = process;
-  stdout.write("\x1b[?25l\x1b[?1049h");
-  stdin.setRawMode(true);
-  stdin.resume();
-  render();
-
-  return new Promise<void>((resolve) => {
-    function done() {
-      stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m");
-      stdin.setRawMode(false);
-      stdin.removeAllListeners("data");
-      setTimeout(() => resolve(), 50);
-    }
-
-    stdin.on("data", (buf: Buffer) => {
-      const k = buf.toString();
-      if (k === "\x1b[A") { selectedIdx = Math.max(0, selectedIdx - 1); render(); return; }
-      if (k === "\x1b[B") { selectedIdx = Math.min(serfs.length - 1, selectedIdx + 1); render(); return; }
-      if (k === "\r" || k === "\n") {
-        done();
-        attachSerf(serfs[selectedIdx].session);
-        return;
-      }
-      if (k === "\x1b" || k === "\u0003") { done(); return; }
-    });
-  });
-}
-
-// Transport picker (standalone, non-interactive)
 async function pickTransport(): Promise<TransportType | null> {
   const all = allTransports();
   console.log("Available transports:");
   all.forEach((t, i) => console.log(`  ${i + 1}. ${t.label} — ${t.description}`));
   console.log("  0. Quit");
-
   const choice = await ask(`Select transport [1-${all.length}]`);
   const idx = parseInt(choice);
   if (isNaN(idx) || idx === 0) return null;
@@ -463,7 +424,6 @@ async function buildOrgFromSerfs(serfs: ReturnType<typeof listSerfs>, config: Se
   const { detect } = require("./scanner");
   const { create, inferBlueprint } = require("./bootstrap");
 
-  // Build a synthetic org from running serfs
   let org = await detect(ROOT);
   if (!org) {
     const invoke = createInvoke(config);
@@ -472,11 +432,10 @@ async function buildOrgFromSerfs(serfs: ReturnType<typeof listSerfs>, config: Se
     org = await detect(ROOT);
   }
 
-  // Update personas to match serfs
   if (org) {
     org.personas = serfs.map(s => ({
       name: s.persona.name,
-      division: "intelligence",
+      division: "intelligence" as any,
       identity: `${s.persona.name} — ${s.persona.role}`,
       mission: s.persona.role,
       boundaries: "Operates within the intelligence division",
@@ -485,7 +444,7 @@ async function buildOrgFromSerfs(serfs: ReturnType<typeof listSerfs>, config: Se
     }));
   }
 
-  return org || { root: ROOT, divisions: ["intelligence"], personas: [], claudeMd: "", agentsMd: "", routingTable: new Map(), protocol: "" };
+  return org || { root: ROOT, divisions: ["intelligence"], personas: [], claudeMd: "", agentsMd: "", routingTable: new Map(), protocol: "" } as any;
 }
 
 function printHelp() {
@@ -494,22 +453,20 @@ SENTINEL FARM — my-org bootstrap + serf orchestration + directed evolution
 
 USAGE:
   farm launch [transport] [--backend ollama] [--model <model>] [--detach]
-    Configure and launch serf sessions.
-    --backend ollama  Use ollama as model backend
-    --detach           Start serfs in background, don't attach
+    Launch serfs and enter the dashboard (tiled tmux view).
+    --detach  Start serfs in background without entering dashboard
 
     farm launch pi --backend ollama
     farm launch pi --backend ollama --detach
-    farm launch claude
+
+  farm dashboard
+    Reattach to the singleton dashboard. All serfs visible at once.
 
   farm serf [serf-name]
-    Attach to a serf session. No name = interactive picker.
-
-    farm serf
-    farm serf intel-analyst
+    Attach to a serf directly (bypass dashboard).
 
   farm list
-    List all active serfs and their status.
+    List all serfs and dashboard status.
 
   farm spawn <serf-name> <task>
     Send a task into a running serf session.
@@ -523,10 +480,13 @@ USAGE:
 
   farm kill <serf-name>
   farm kill --all
-    Kill a specific serf or all serfs.
+    Kill a specific serf or all serfs + dashboard.
 
-  farm evolve <tool-path>
-    Directed evolution of personas and protocols (coming soon).
+DASHBOARD CONTROLS:
+  ←↑↓→   Navigate between serf panes
+  Enter   Zoom fullscreen into selected serf
+  Ctrl+Space  Return to tiled dashboard view
+  C-b d  Detach from dashboard (serfs keep running)
 
 AVAILABLE TRANSPORTS:
   pi        Pi coding agent
