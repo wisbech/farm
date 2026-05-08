@@ -19,6 +19,8 @@ let width = 80;
 let height = 24;
 let running = false;
 let promptText = "";
+let escBuffer: string | null = null;
+let escTimer: ReturnType<typeof setTimeout> | null = null;
 
 type ViewTab = "chat" | "personas" | "history";
 let activeTab: ViewTab = "chat";
@@ -54,19 +56,40 @@ export async function tuiEntry() {
   render();
 
   stdin.on("data", (buf: Buffer) => {
-    const key = buf.toString();
+    let key = buf.toString();
+
+    // Buffer escape sequences that may arrive split across events
+    if (escBuffer !== null) {
+      key = escBuffer + key;
+      escBuffer = null;
+      if (escTimer) { clearTimeout(escTimer); escTimer = null; }
+    }
 
     if (key === "\x03") terminate();      // Ctrl+C → quit
-    else if (key === "\x1b") activeTab = "chat";  // Esc → chat
     else if (key === "\x04" && !promptText) terminate(); // Ctrl+D on empty → quit
     else if (key === "\r" || key === "\n") submitCommand();
     else if (key === "\x7f" || key === "\b") { if (promptText) promptText = promptText.slice(0, -1); render(); }
-    else if (key === "\x1b[A") { scrollOffset = Math.min(scrollOffset + 1, Math.max(0, outputLines.length - bodyHeight())); render(); }
-    else if (key === "\x1b[B") { scrollOffset = Math.max(0, scrollOffset - 1); render(); }
     else if (key === "\x14") { if (agent && running) agent.send("/compact"); addToHistory(state, "[compact]"); promptText = ""; render(); }
     else if (key === "\x01") activeTab = "personas";
     else if (key === "\x02") activeTab = "history";
-    else if (key === "\x03") activeTab = "chat";
+    else if (key === "\x1b") {
+      // Could be lone Esc or start of escape sequence — buffer and wait
+      escBuffer = "\x1b";
+      escTimer = setTimeout(() => {
+        if (escBuffer === "\x1b") { escBuffer = null; activeTab = "chat"; render(); }
+        escTimer = null;
+      }, 20);
+    }
+    // Full escape sequences (arrow keys arrive complete)
+    else if (key === "\x1b[A") { scrollOffset = Math.min(scrollOffset + 1, Math.max(0, outputLines.length - bodyHeight())); render(); }
+    else if (key === "\x1b[B") { scrollOffset = Math.max(0, scrollOffset - 1); render(); }
+    // Partial escape seq continuation (e.g., "[A" after buffered \x1b)
+    else if (key.startsWith("\x1b[") && key.length >= 3 && key.length <= 4) {
+      const code = key.charCodeAt(2);
+      if (code === 65) { scrollOffset = Math.min(scrollOffset + 1, Math.max(0, outputLines.length - bodyHeight())); render(); }
+      else if (code === 66) { scrollOffset = Math.max(0, scrollOffset - 1); render(); }
+      // C/D ignored — not used
+    }
     else if (key.length === 1 && key >= " ") { promptText += key; render(); }
   });
 }
@@ -124,10 +147,10 @@ function submitCommand() {
   }
 
   if (!agent) {
-    const persona = findPersona(cmd.split(" ")[0], state.personas);
     agent = startAgent(
       state.transport,
       state.model,
+      state.backend,
       (text: string) => {
         outputLines.push(...text.split("\n"));
         if (outputLines.length > 2000) outputLines = outputLines.slice(-2000);
